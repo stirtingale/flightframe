@@ -1,0 +1,18 @@
+[Unit]
+Description=Flight frame display
+After=network.target NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/flightframe
+Environment=PYTHONUNBUFFERED=1
+Environment=FRAME_STATE_DIR=/var/lib/flightframe
+ExecStart=/opt/flightframe/venv/bin/python -m flightframe --port 80
+Restart=always
+RestartSec=10
+# Root is needed for the SPI/GPIO pins, port 80 and switching Wi-Fi.
+User=root
+
+[Install]
+WantedBy=multi-user.target
