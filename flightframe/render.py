@@ -135,7 +135,6 @@ def _header(c, left, right, accent):
 
 def _footer(c, cfg, extra=""):
     y = c.h - c.m + 4
-    c.rule(y - 22, thick=1)
     label = cfg.get("label") or ""
     c.text((c.m, y), label, font("regular", 15), anchor="ls")
     right = f"{extra}  ·  {_now()}" if extra else f"Updated {_now()}"
@@ -229,10 +228,9 @@ def _footer_wx(c, wx):
     """Bottom line on one row: sunrise and sunset, then the next 12 hours."""
     bottom = c.h - c.m + 10
     top = bottom - FOOTER_WX
-    c.rule(top, thick=1)
     mid = top + FOOTER_WX // 2 + 1
     f_time = font("semi", 15)
-    f_hour = font("regular", 12)
+    f_hour = font("regular", 15)          # same size as the sunrise/sunset times
     f_temp = font("semi", 15)
     x = c.m
     sun = (wx or {}).get("sun") or (None, None)
@@ -240,7 +238,7 @@ def _footer_wx(c, wx):
         for t, up in ((sun[0], True), (sun[1], False)):
             _sun_glyph(c.d, x + 11, mid, up)
             c.text((x + 30, mid), t.strftime("%H:%M"), f_time, anchor="lm")
-            x += 30 + int(text_w(c.d, "00:00", f_time)) + 14
+            x += 30 + int(text_w(c.d, "00:00", f_time)) + 16
     slots = (wx or {}).get("slots") or []
     if not slots:
         c.text((c.w - c.m, mid), f"Updated {_now()}", font("regular", 13), anchor="rm")
@@ -248,15 +246,18 @@ def _footer_wx(c, wx):
     hour_w = int(text_w(c.d, "00:00", f_hour))
     temp_w = int(text_w(c.d, "00°", f_temp))
     icon = 24
-    pad_l, pad_r = 9, 4                 # room for sun rays on the left of an icon
+    pad_l, pad_r = 12, 9                # space either side of each icon
     cell = hour_w + pad_l + icon + pad_r + temp_w
-    gap = 11
+    gap = 16
     room = c.w - c.m - x - 6
-    n = max(0, min(len(slots), (room + gap) // (cell + gap)))
-    x0 = c.w - c.m - n * cell - (n - 1) * gap
+    fits = max(0, (room + gap) // (cell + gap))
+    if fits < len(slots):
+        slots = slots[1:]               # short of space: the next hours matter more than now
+    n = min(len(slots), fits)
+    x0 = c.w - c.m - n * cell - max(0, n - 1) * gap
     for i, sl in enumerate(slots[:n]):
         cx = x0 + i * (cell + gap)
-        label = "Now" if i == 0 else sl["time"].strftime("%H:%M")
+        label = "Now" if sl is (wx or {}).get("slots", [None])[0] else sl["time"].strftime("%H:%M")
         c.text((cx + hour_w, mid), label, f_hour, anchor="rm")
         weather_icon(c.d, sl["kind"], sl["day"], cx + hour_w + pad_l + icon // 2, mid, icon)
         c.text((cx + hour_w + pad_l + icon + pad_r, mid), f"{round(sl['temp'])}°", f_temp, anchor="lm")
@@ -389,7 +390,6 @@ def poster(f, cfg, nearby=0, logo=None, wx=None):
 
     # --- figures
     y = max(y + 10, stats_top)
-    c.rule(y - 14, thick=1)
     ph = phase(f)
     cells = [
         ("Altitude" + ("" if ph == "level" else f" · {ph}"), fmt_alt(f.altitude_ft, units)),
