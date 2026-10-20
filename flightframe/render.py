@@ -237,8 +237,8 @@ def _footer_wx(c, wx):
     if sun[0]:
         for t, up in ((sun[0], True), (sun[1], False)):
             _sun_glyph(c.d, x + 11, mid, up)
-            c.text((x + 30, mid), t.strftime("%H:%M"), f_time, anchor="lm")
-            x += 30 + int(text_w(c.d, "00:00", f_time)) + 16
+            c.text((x + 38, mid), t.strftime("%H:%M"), f_time, anchor="lm")
+            x += 38 + int(text_w(c.d, "00:00", f_time)) + 18
     slots = (wx or {}).get("slots") or []
     if not slots:
         c.text((c.w - c.m, mid), f"Updated {_now()}", font("regular", 13), anchor="rm")
@@ -335,6 +335,7 @@ def poster(f, cfg, nearby=0, logo=None, wx=None):
     rows = 2 if c.portrait else 1
     stats_top = c.h - c.m + 10 - FOOTER_WX - rows * ROW_H - 14
 
+    content_end = y
     # --- route
     if f.has_route:
         o, d = f.origin, f.destination
@@ -350,9 +351,10 @@ def poster(f, cfg, nearby=0, logo=None, wx=None):
             ah = big.getbbox("A")[3]
             for i, ap in enumerate((o, d)):
                 c.text((c.m - 3, y), ap["iata"], big, anchor="lt")
-                cy = y + ah + 12
+                cy = y + ah - 3
                 fc_ = fit(c.d, ap["city"], "semi", 20, inner, 14)
                 c.text((c.m, cy), ellipsize(c.d, ap["city"], fc_, inner), fc_, anchor="lt")
+                content_end = cy + fc_.getbbox("L")[3]
                 y = cy + fc.size + 16
                 if i == 0:
                     _arrow(c, c.m, c.m + 70, y + 6, accent, head=14, thick=4)
@@ -372,10 +374,10 @@ def poster(f, cfg, nearby=0, logo=None, wx=None):
             ah = big.getbbox("A")[3]
             _arrow(c, c.m + code_w + 22, c.m + code_w + arrow_w - 22, y + ah * 0.55,
                    accent, head=14, thick=4)
-            cy = y + ah + 14
+            cy = y + ah - 3                       # half the old gap below the codes
             c.text((c.m, cy), ellipsize(c.d, o["city"], fc, code_w), fc, anchor="lt")
             c.text((c.w - c.m, cy), ellipsize(c.d, d["city"], fc, code_w), fc, anchor="rt")
-            y = cy + fc.size + 10
+            content_end = cy + fc.getbbox("L")[3]
     else:
         name = f.type_name or f.type_code or "Aircraft"
         room = stats_top - 22 - y
@@ -383,13 +385,12 @@ def poster(f, cfg, nearby=0, logo=None, wx=None):
         while size > 22 and font("bold", size).getbbox("Ag")[3] > room:
             size -= 2
         fb = fit(c.d, name, "bold", size, inner, 22)
-        nh = fb.getbbox("Ag")[3]
-        ny = y + max(0, (room - nh) // 2) - 4
-        c.text((c.m - 2, ny), ellipsize(c.d, name, fb, inner), fb, anchor="lt")
-        y = ny + nh
+        c.text((c.m - 2, y), ellipsize(c.d, name, fb, inner), fb, anchor="lt")
+        content_end = y + fb.getbbox("L")[3]
 
     # --- figures
-    y = max(y + 10, stats_top)
+    # figures follow the route with a 17px gap (half the old spacing); never past the bottom limit
+    y = min(content_end + 12 - font("bold", 12).getbbox("A")[1], stats_top)
     ph = phase(f)
     cells = [
         ("Altitude" + ("" if ph == "level" else f" · {ph}"), fmt_alt(f.altitude_ft, units)),
