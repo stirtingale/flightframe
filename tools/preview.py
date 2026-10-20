@@ -58,6 +58,17 @@ SAMPLES = {
 }
 
 
+def sample_wx():
+    from datetime import datetime, timedelta
+    from flightframe import weather
+    now = datetime.now().astimezone().replace(minute=0, second=0, microsecond=0)
+    kinds = [("partly", True), ("showers", True), ("cloudy", True), ("clear", False), ("rain", False)]
+    temps = [14, 13, 11, 9, 8]
+    return {"sun": weather.sun_times(51.38, -2.36),
+            "slots": [{"time": now + timedelta(hours=3 * i), "temp": t, "kind": k, "day": d}
+                      for i, (t, (k, d)) in enumerate(zip(temps, kinds))]}
+
+
 def _logo(f):
     return logos.get(logos.airline_icao(f.callsign, f.airline_icao), f.airline_iata)
 
@@ -68,8 +79,8 @@ def main(out):
     for orient in ("landscape", "portrait"):
         cfg["orientation"] = orient
         for name, f in SAMPLES.items():
-            render.poster(f, cfg, nearby=4, logo=_logo(f)).save(f"{out}/{orient}-{name}.png")
-        render.quiet(cfg, "BA283 LHR–LAX at 21:14").save(f"{out}/{orient}-quiet.png")
+            render.poster(f, cfg, nearby=4, logo=_logo(f), wx=sample_wx()).save(f"{out}/{orient}-{name}.png")
+        render.quiet(cfg, "BA283 LHR–LAX at 21:14", wx=sample_wx()).save(f"{out}/{orient}-quiet.png")
         render.message(cfg, "Connect me to Wi-Fi",
                        ["Join the Wi-Fi network Flightframe-Setup (password skyabove).",
                         "Then open http://10.42.0.1 and choose your home Wi-Fi."],

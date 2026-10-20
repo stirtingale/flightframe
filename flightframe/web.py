@@ -56,6 +56,7 @@ def create_app(worker):
                 cfg[key] = f[key]
         cfg["show_plane"] = f.get("show_plane") == "1"
         cfg["flip"] = f.get("flip") == "1"
+        cfg["show_weather"] = f.get("show_weather") == "1"
         for key in ("quiet_start", "quiet_end"):
             v = f.get(key, "").strip()
             cfg[key] = v if re.fullmatch(r"\d{2}:\d{2}", v) else ""
@@ -135,7 +136,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Flight frame</title>
 <style>
-:root{--ink:#111;--muted:#6b6b6b;--line:#e4e2dd;--bg:#faf9f6;--card:#fff;--accent:#e33b22}
+:root{--ink:#111;--muted:#6b6b6b;--line:#e4e2dd;--bg:#faf9f6;--card:#fff;--accent:{{ {'red':'#c4342c','blue':'#263e8c','green':'#225c3a','yellow':'#b8951a'}.get(cfg.accent, '#225c3a') }}}
 @media (prefers-color-scheme:dark){:root{--ink:#f2f0eb;--muted:#a19d96;--line:#33312d;--bg:#161513;--card:#1f1e1b}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
@@ -258,9 +259,14 @@ a{color:inherit}
     <label><input type="radio" name="show_plane" value="1" {{ 'checked' if cfg.show_plane }}><span>With airline logo</span></label>
     <label><input type="radio" name="show_plane" value="0" {{ 'checked' if not cfg.show_plane }}><span>Off</span></label>
   </div>
+  <label>Weather in the bottom line</label>
+  <div class="seg">
+    <label><input type="radio" name="show_weather" value="1" {{ 'checked' if cfg.show_weather }}><span>12-hour forecast</span></label>
+    <label><input type="radio" name="show_weather" value="0" {{ 'checked' if not cfg.show_weather }}><span>Sun times only</span></label>
+  </div>
   <label>Accent colour</label>
   <div class="swatches">
-    {% set hex = {'red':'#e8382a','blue':'#2a4fd6','green':'#2f9a4a','yellow':'#f2d13a'} %}
+    {% set hex = {'red':'#c4342c','blue':'#263e8c','green':'#225c3a','yellow':'#e8c83a'} %}
     {% for a in accents %}
     <label style="margin:0"><input type="radio" name="accent" value="{{ a }}" {{ 'checked' if cfg.accent==a }}><span style="background:{{ hex[a] }}" title="{{ a }}"></span></label>
     {% endfor %}

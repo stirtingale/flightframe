@@ -1,6 +1,6 @@
 # Flight frame
 
-A colour E Ink frame for Raspberry Pi that shows the plane flying over your house right now: the route, airline, altitude and speed, with a simple drawing of the aircraft and the airline's logo on its tail.
+A colour E Ink frame for Raspberry Pi that shows the plane flying over your house right now: the route, airline, altitude and speed, with a drawing of that exact aircraft type and the airline's logo on its tail. The bottom line carries today's sunrise and sunset and a 12-hour weather forecast.
 
 It's set up from your phone, with no app, no account and no subscription. The parts cost about £80.
 
@@ -34,9 +34,13 @@ It's set up from your phone, with no app, no account and no subscription. The pa
 | ![Quiet skies](docs/images/screen-quiet.png) | <img src="docs/images/screen-portrait.png" alt="Portrait layout" width="160"> |
 | Nothing in range | Portrait layout |
 
-The aircraft drawing is chosen from the type of aircraft. The airline's logo is downloaded the first time that airline appears.
+### Aircraft drawings
 
-![The ten aircraft families](docs/images/aircraft-families.png)
+Each aircraft is drawn from its own measurements, so an A321neo is longer than an A319, a 737 MAX has split winglets, a 747 its hump and an A380 two decks. The archive covers **200+ types**, from airliners and business jets to helicopters, light aircraft, military types and hot air balloons. **[See every drawing](docs/airframes/README.md)**.
+
+![Jets in the archive](docs/airframes/jet.png)
+
+The frame downloads the latest archive from this repository once a day, so new types appear without reinstalling. The airline's logo is downloaded the first time that airline appears.
 
 ## Parts
 
@@ -167,7 +171,7 @@ You can set:
 
 - **Location:** an address, postcode or pasted `lat, lon`, plus the name shown in the footer
 - **Range:** how far out counts as overhead, and an altitude ceiling
-- **Look:** metric or imperial, landscape or portrait, normal or upside down, aircraft drawing on or off, accent colour
+- **Look:** metric or imperial, landscape or portrait, normal or upside down, aircraft drawing on or off, 12-hour forecast or sun times only, accent colour (green by default, which looks British racing green on the paper)
 - **Refresh:** the minimum gap before a new flight is drawn, how often height and speed update, and quiet hours
 
 The page also shows a live preview of what's on the paper.
@@ -179,7 +183,8 @@ The page also shows a live preview of what's on the paper.
 - It picks the nearest aircraft within range, measured on the slant, so a jet directly overhead beats a light aircraft a few miles off. If a flight with a known route is nearly as close, it prefers that one.
 - Colour E Ink takes about 30 seconds per refresh and shouldn't refresh more often than every 3 minutes. So the paper only redraws when a **different** flight is overhead, or every 10 minutes to update height and speed. With no power, it keeps its last picture.
 - Everything is drawn in the panel's six exact colours with no anti-aliasing, so text stays crisp and nothing gets dithered.
-- **Aircraft drawings** are generic line drawings for each family, picked from the ICAO type code or the broadcast category.
+- **Aircraft drawings** are built from each type's dimensions in [`flightframe/data/airframes.json`](flightframe/data/airframes.json) (generated from [`tools/build_airframes.py`](tools/build_airframes.py)). Unknown type codes use the closest match (a `B739ER` draws as a `B739`), then the broadcast category. The archive is refreshed from GitHub once a day, and a copy ships with the app.
+- **Weather** comes from [MET Norway](https://api.met.no) (falling back to [Open-Meteo](https://open-meteo.com)), cached for 30 minutes and kept for up to 6 hours if both are down. Sunrise and sunset are calculated on the Pi, so they always show.
 - **Airline logos** come from the [airline-logos](https://github.com/Jxck-S/airline-logos) collection (with Kiwi.com's icons as a fallback). They're cached in `/var/lib/flightframe/logos` and fitted inside the tail fin. A logo that's all yellow gets a black fin so it stays visible. With no logo, the fin takes the accent colour. To use your own image, drop a PNG named after the airline's ICAO code (e.g. `BAW.png`) into that folder.
 - **Outages don't take over the screen.** For the first 45 minutes without data, the last picture stays up. After that, a calm "Waiting for flight data" screen appears, and the sky returns as soon as data does.
 - The setup hotspot only opens if the Wi-Fi connection itself is lost for 30 minutes (not just the internet or a data service). While in setup mode, it tries your saved Wi-Fi every 10 minutes and rejoins by itself.
@@ -198,9 +203,11 @@ journalctl -u flightframe -f
 | Logs say no Inky was detected | Reseat the board, check you rebooted after installing, and check `dtoverlay=spi0-0cs` is in `/boot/firmware/config.txt`. |
 | Can't open flightframe.local | Your phone must be on the same Wi-Fi. Press button D for the QR code, or use the Pi's IP address from your router. |
 | Picture is upside down | Settings page → **Mounted: upside down**. |
-| Wrong or missing route | Route data comes from a community database and is sometimes missing or out of date. You'll see the aircraft type and "Route not published". |
-| "Waiting for flight data" | No source has answered for 45 minutes. Open the settings page to see each source's status. If adsb.fi shows "refused", the service may have changed its terms: check [adsb.fi](https://adsb.fi). |
+| Wrong or missing route | Route data comes from a community database and is sometimes missing or out of date. When there is no route, the frame shows the aircraft type instead. |
+| "Waiting for flight data" (below) | No source has answered for 45 minutes. Open the settings page to see each source's status. If adsb.fi shows "refused", the service may have changed its terms: check [adsb.fi](https://adsb.fi). |
 | Very few flights | Increase the range on the settings page. Near airports and flight paths you'll see far more. |
+
+![Waiting for flight data](docs/images/screen-outage.png)
 
 **Updating:**
 
@@ -222,7 +229,9 @@ Your settings and cached logos live in `/var/lib/flightframe`, so they survive u
 
 ```bash
 pip install pillow flask requests qrcode numpy
-python3 tools/preview.py previews        # every screen and aircraft as PNGs
+python3 tools/preview.py previews        # every screen as PNGs
+python3 tools/build_airframes.py         # rebuild the archive after editing it
+python3 tools/airframe_sheets.py         # redraw the catalogue in docs/airframes
 FRAME_STATE_DIR=./state python3 -m flightframe --port 8080 --display preview
 ```
 
@@ -235,7 +244,10 @@ flightframe/
   app.py       main loop: when to poll and when the paper is worth refreshing
   flights.py   ADS-B feeds, nearest-aircraft choice, route and aircraft lookup
   render.py    the screens, drawn in the panel's exact six colours
-  plane.py     aircraft line drawings, with the logo fitted into the tail fin
+  plane.py     renders aircraft drawings, with the logo fitted into the tail fin
+  airframes.py builds each type's drawing from its dimensions; daily archive refresh
+  data/airframes.json  the aircraft archive (200+ types)
+  weather.py   12-hour forecast and sunrise/sunset
   logos.py     airline logo download and cache
   display.py   Inky or Waveshare panel, or PNG preview on a normal computer
   buttons.py   Inky side buttons
@@ -243,7 +255,7 @@ flightframe/
   wifi.py      setup hotspot through NetworkManager
 install.sh     one-shot installer (PANEL=inky by default, or PANEL=waveshare)
 systemd/       service definition
-tools/         preview renderer
+tools/         preview renderer, airframe archive builder, catalogue and README image generators
 docs/images/   README images
 ```
 
@@ -251,6 +263,8 @@ docs/images/   README images
 
 - Aircraft positions: [adsb.fi](https://adsb.fi) (primary) and [adsb.lol](https://adsb.lol) (fallback), community ADS-B networks. Both are free for **personal, non-commercial use**, and adsb.fi asks to be credited, as it is here and on the settings page. If you have a receiver, consider [feeding adsb.fi](https://adsb.fi): feeders also get higher limits.
 - Routes and aircraft: [adsbdb](https://www.adsbdb.com).
+- Weather: [MET Norway](https://api.met.no) (CC BY 4.0) and [Open-Meteo](https://open-meteo.com) (CC BY 4.0).
+- Aircraft drawings: original line drawings generated from approximate published dimensions.
 - Airline logos: [Jxck-S/airline-logos](https://github.com/Jxck-S/airline-logos) and Kiwi.com. Logos remain their airlines' trademarks. They're downloaded at run time for display on your own frame and are not included in this repository.
 - Panel driver: Pimoroni's [inky](https://github.com/pimoroni/inky) library.
 - Inspired by the [Avioframe](https://avioframe.com). This is an independent project, not affiliated with it.

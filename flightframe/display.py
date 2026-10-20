@@ -10,7 +10,7 @@ import threading
 from PIL import Image
 
 from .config import STATE_DIR
-from .render import for_panel
+from .render import as_seen, for_panel
 
 log = logging.getLogger(__name__)
 PREVIEW_PATH = os.path.join(STATE_DIR, "screen.png")
@@ -44,7 +44,7 @@ class PreviewDisplay:
 
     def show(self, img):
         os.makedirs(STATE_DIR, exist_ok=True)
-        img.save(PREVIEW_PATH)
+        as_seen(img).save(PREVIEW_PATH)
 
 
 class InkyDisplay(PreviewDisplay):

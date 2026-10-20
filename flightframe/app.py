@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 
-from . import config, logos, render, wifi
+from . import airframes, config, logos, render, weather, wifi
 from .display import make_display
 from .flights import FlightSource
 
@@ -31,6 +31,7 @@ class Worker:
     def __init__(self, display, source=None):
         self.display = display
         self.source = source or FlightSource()
+        self.weather = weather.Weather()
         self.wake = threading.Event()
         self.force = False
         self.status = "starting"
@@ -207,6 +208,21 @@ class Worker:
         else:
             self._enter_setup(cfg, note="Couldn't reach your Wi-Fi.")
 
+    def _wx(self, cfg):
+        """Forecast and sun times for the bottom line. Never raises."""
+        lat, lon = float(cfg["lat"]), float(cfg["lon"])
+        out = {"sun": (None, None), "slots": None}
+        try:
+            out["sun"] = weather.sun_times(lat, lon)
+        except Exception:
+            log.exception("sun times")
+        if cfg.get("show_weather", True):
+            try:
+                out["slots"] = self.weather.forecast(lat, lon)
+            except Exception:
+                log.exception("weather")
+        return out
+
     def _tick(self):
         cfg = config.load()
         if self.setup_mode:
@@ -219,6 +235,7 @@ class Worker:
                            "Your phone needs to be on the same Wi-Fi."],
                           qr=settings_url())
             return
+        airframes.refresh(self.source.s)     # at most daily; never raises
         if in_quiet_hours(cfg) and not self.force:
             self.status = "quiet_hours"
             return
@@ -262,9 +279,9 @@ class Worker:
             if cfg.get("show_plane", True):
                 logo = logos.get(logos.airline_icao(flight.callsign, flight.airline_icao),
                                  flight.airline_iata, session=self.source.s)
-            img = render.poster(flight, cfg, nearby, logo=logo)
+            img = render.poster(flight, cfg, nearby, logo=logo, wx=self._wx(cfg))
         else:
-            img = render.quiet(cfg, self.last_seen if self.last_seen else None)
+            img = render.quiet(cfg, self.last_seen if self.last_seen else None, wx=self._wx(cfg))
         self._show(img, key)
 
 
