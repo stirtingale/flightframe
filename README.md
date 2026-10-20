@@ -174,13 +174,15 @@ The page also shows a live preview of what's on the paper.
 
 ## How it works
 
-- Every 30 seconds it asks [airplanes.live](https://airplanes.live) (falling back to [adsb.lol](https://adsb.lol)) for aircraft near you, then looks up the airline, route and aircraft on [adsbdb](https://www.adsbdb.com).
+- Every 30 seconds it asks [adsb.fi](https://adsb.fi) for aircraft near you, then looks up the airline, route and aircraft on [adsbdb](https://www.adsbdb.com). If adsb.fi is down it falls back to [adsb.lol](https://adsb.lol), which allows only 500 requests a day per connection, so it's kept for emergencies.
+- Each source is treated politely. A "slow down" reply (HTTP 429) pauses that source for exactly as long as it asks, a refusal pauses it for 6 hours, and timeouts back off from 30 seconds up to 5 minutes. While nothing answers, the frame polls less often. The settings page shows each source's status.
 - It picks the nearest aircraft within range, measured on the slant, so a jet directly overhead beats a light aircraft a few miles off. If a flight with a known route is nearly as close, it prefers that one.
 - Colour E Ink takes about 30 seconds per refresh and shouldn't refresh more often than every 3 minutes. So the paper only redraws when a **different** flight is overhead, or every 10 minutes to update height and speed. With no power, it keeps its last picture.
 - Everything is drawn in the panel's six exact colours with no anti-aliasing, so text stays crisp and nothing gets dithered.
 - **Aircraft drawings** are generic line drawings for each family, picked from the ICAO type code or the broadcast category.
 - **Airline logos** come from the [airline-logos](https://github.com/Jxck-S/airline-logos) collection (with Kiwi.com's icons as a fallback). They're cached in `/var/lib/flightframe/logos` and fitted inside the tail fin. A logo that's all yellow gets a black fin so it stays visible. With no logo, the fin takes the accent colour. To use your own image, drop a PNG named after the airline's ICAO code (e.g. `BAW.png`) into that folder.
-- If the internet is down for more than 10 minutes, it reopens the setup hotspot.
+- **Outages don't take over the screen.** For the first 45 minutes without data, the last picture stays up. After that, a calm "Waiting for flight data" screen appears, and the sky returns as soon as data does.
+- The setup hotspot only opens if the Wi-Fi connection itself is lost for 30 minutes (not just the internet or a data service). While in setup mode, it tries your saved Wi-Fi every 10 minutes and rejoins by itself.
 
 ## Troubleshooting
 
@@ -197,6 +199,7 @@ journalctl -u flightframe -f
 | Can't open flightframe.local | Your phone must be on the same Wi-Fi. Press button D for the QR code, or use the Pi's IP address from your router. |
 | Picture is upside down | Settings page → **Mounted: upside down**. |
 | Wrong or missing route | Route data comes from a community database and is sometimes missing or out of date. You'll see the aircraft type and "Route not published". |
+| "Waiting for flight data" | No source has answered for 45 minutes. Open the settings page to see each source's status. If adsb.fi shows "refused", the service may have changed its terms: check [adsb.fi](https://adsb.fi). |
 | Very few flights | Increase the range on the settings page. Near airports and flight paths you'll see far more. |
 
 **Updating:**
@@ -204,6 +207,14 @@ journalctl -u flightframe -f
 ```bash
 cd ~/flightframe && git pull && sudo ./install.sh
 ```
+
+If you installed by copying the folder rather than with `git clone`, switch to a clone once:
+
+```bash
+cd ~ && git clone https://github.com/stirtingale/flightframe.git && cd flightframe && sudo ./install.sh
+```
+
+Your settings and cached logos live in `/var/lib/flightframe`, so they survive updates.
 
 **Settings file:** `/var/lib/flightframe/config.json`
 
@@ -238,7 +249,7 @@ docs/images/   README images
 
 ## Credits and data
 
-- Aircraft positions: [airplanes.live](https://airplanes.live) and [adsb.lol](https://adsb.lol), community ADS-B networks. Both are free for **non-commercial use**. Please keep polling gentle, and consider [feeding](https://airplanes.live/how-to-feed/) them if you have a receiver.
+- Aircraft positions: [adsb.fi](https://adsb.fi) (primary) and [adsb.lol](https://adsb.lol) (fallback), community ADS-B networks. Both are free for **personal, non-commercial use**, and adsb.fi asks to be credited, as it is here and on the settings page. If you have a receiver, consider [feeding adsb.fi](https://adsb.fi): feeders also get higher limits.
 - Routes and aircraft: [adsbdb](https://www.adsbdb.com).
 - Airline logos: [Jxck-S/airline-logos](https://github.com/Jxck-S/airline-logos) and Kiwi.com. Logos remain their airlines' trademarks. They're downloaded at run time for display on your own frame and are not included in this repository.
 - Panel driver: Pimoroni's [inky](https://github.com/pimoroni/inky) library.

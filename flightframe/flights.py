@@ -1,8 +1,13 @@
 """Find the aircraft overhead and work out where it is going.
 
-Positions come from the free, community ADS-B networks (airplanes.live first,
-adsb.lol as a fallback). Airline, route and aircraft details come from adsbdb.
-Both are non-commercial services, so keep polling gentle (default every 30 s).
+Positions come from free community ADS-B networks: adsb.fi first (1 request a
+second, no daily cap), adsb.lol as a fallback (capped at 500 requests a day per
+connection, so it's only used when adsb.fi is down). Airline, route and aircraft
+details come from adsbdb. All are for personal, non-commercial use.
+
+Each source is paused when it says so: a 429 waits for its reset time, a 403
+waits hours, and timeouts or server errors back off gradually. A struggling
+source is never hammered, and the next one is tried straight away.
 """
 import logging
 import math
@@ -16,11 +21,69 @@ log = logging.getLogger(__name__)
 UA = {"User-Agent": "flightframe-pi/1.1 (personal flight display)"}
 KM_PER_NM = 1.852
 
-FEEDS = [
-    "https://api.airplanes.live/v2/point/{lat:.4f}/{lon:.4f}/{nm}",
-    "https://api.adsb.lol/v2/lat/{lat:.4f}/lon/{lon:.4f}/dist/{nm}",
-]
 ADSBDB = "https://api.adsbdb.com/v0/aircraft/{hex}?callsign={callsign}"
+
+
+@dataclass
+class Feed:
+    name: str
+    url: str
+    daily_budget: int = 0          # 0 = no cap
+    paused_until: float = 0.0
+    fails: int = 0
+    last_ok: float = 0.0
+    last_error: str = ""
+    used_today: int = 0
+    day: str = ""
+
+    def available(self, now):
+        if now < self.paused_until:
+            return False
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        if today != self.day:
+            self.day, self.used_today = today, 0
+        return not self.daily_budget or self.used_today < self.daily_budget
+
+    def status(self, now):
+        if now < self.paused_until:
+            state = "paused"
+        elif self.last_ok and not self.fails:
+            state = "ok"
+        elif self.fails:
+            state = "failing"
+        else:
+            state = "standby"
+        return {"name": self.name, "state": state, "error": self.last_error,
+                "resumes": time.strftime("%H:%M", time.localtime(self.paused_until))
+                if now < self.paused_until else "",
+                "last_ok": time.strftime("%H:%M", time.localtime(self.last_ok)) if self.last_ok else "",
+                "used_today": self.used_today}
+
+
+def default_feeds():
+    return [
+        Feed("adsb.fi", "https://opendata.adsb.fi/api/v3/lat/{lat:.4f}/lon/{lon:.4f}/dist/{nm}"),
+        # 500 a day per connection; keep some headroom
+        Feed("adsb.lol", "https://api.adsb.lol/v2/lat/{lat:.4f}/lon/{lon:.4f}/dist/{nm}",
+             daily_budget=450),
+    ]
+
+
+def _pause_seconds(resp, default):
+    """How long a 429 asks us to wait, from Retry-After or x-ratelimit-reset."""
+    for h in ("Retry-After", "x-ratelimit-reset", "X-RateLimit-Reset"):
+        v = resp.headers.get(h)
+        if not v:
+            continue
+        try:
+            n = float(v)
+        except ValueError:
+            continue
+        if n > 1e9:                     # an absolute epoch time
+            n -= time.time()
+        if n > 0:
+            return min(n, 24 * 3600)
+    return default
 
 
 @dataclass
@@ -49,7 +112,12 @@ class Flight:
 
     @property
     def flight_number(self):
-        return self.flight_iata or self.callsign
+        # Only trust the short form (BA283) when it carries the airline's code;
+        # the route database sometimes drops it ("84U").
+        fi = self.flight_iata
+        if fi and self.airline_iata and fi.upper().startswith(self.airline_iata.upper()):
+            return fi
+        return self.callsign
 
     @property
     def has_route(self):
@@ -85,20 +153,65 @@ class FlightSource:
         self.s.headers.update(UA)
         self._route_cache = {}   # (hex, callsign) -> (expires, details)
         self.last_error = ""
+        self.feeds = default_feeds()
 
     # ---- positions -------------------------------------------------------
     def aircraft_near(self, lat, lon, radius_km):
         nm = max(1, min(250, math.ceil(radius_km / KM_PER_NM)))
-        for url in FEEDS:
+        now = time.time()
+        tried = []
+        for feed in self.feeds:
+            if not feed.available(now):
+                continue
+            tried.append(feed.name)
+            feed.used_today += 1
             try:
-                r = self.s.get(url.format(lat=lat, lon=lon, nm=nm), timeout=10)
-                r.raise_for_status()
-                self.last_error = ""
-                return r.json().get("ac") or []
-            except (requests.RequestException, ValueError) as e:
-                self.last_error = f"{url.split('/')[2]}: {e}"
-                log.warning("feed failed: %s", self.last_error)
-        raise ConnectionError(self.last_error or "no flight feed reachable")
+                r = self.s.get(feed.url.format(lat=lat, lon=lon, nm=nm), timeout=(5, 12))
+            except requests.RequestException as e:
+                self._failed(feed, f"{type(e).__name__}", now)
+                continue
+            if r.status_code == 429:
+                wait = _pause_seconds(r, 15 * 60)
+                feed.paused_until = now + wait
+                feed.last_error = f"rate limited, waiting {int(wait // 60)} min"
+                log.warning("%s: %s", feed.name, feed.last_error)
+                continue
+            if r.status_code in (401, 403):
+                feed.paused_until = now + 6 * 3600
+                feed.last_error = f"refused ({r.status_code}), retrying in 6 hours"
+                log.warning("%s: %s", feed.name, feed.last_error)
+                continue
+            if r.status_code != 200:
+                self._failed(feed, f"HTTP {r.status_code}", now)
+                continue
+            try:
+                data = r.json()
+            except ValueError:
+                self._failed(feed, "bad response", now)
+                continue
+            feed.fails, feed.last_ok, feed.last_error = 0, now, ""
+            self.last_error = ""
+            return data.get("ac") or data.get("aircraft") or []
+        if not tried:
+            nxt = min((f.paused_until for f in self.feeds if f.paused_until > now), default=0)
+            when = time.strftime("%H:%M", time.localtime(nxt)) if nxt else "tomorrow"
+            self.last_error = f"all sources paused until {when}"
+        else:
+            self.last_error = "; ".join(f"{f.name}: {f.last_error}" for f in self.feeds if f.last_error)
+        raise ConnectionError(self.last_error or "no flight source reachable")
+
+    def _failed(self, feed, why, now):
+        """Timeouts and server errors: back off 30 s, 1, 2, 4, then every 5 min."""
+        feed.fails += 1
+        wait = min(300, 30 * 2 ** (feed.fails - 1))
+        feed.paused_until = now + wait
+        feed.last_error = f"{why}, retrying in {int(wait)} s" if wait < 120 else \
+            f"{why}, retrying in {int(wait // 60)} min"
+        log.warning("%s: %s", feed.name, feed.last_error)
+
+    def feed_status(self):
+        now = time.time()
+        return [f.status(now) for f in self.feeds]
 
     # ---- route + aircraft details -----------------------------------------
     def details(self, hex_, callsign):

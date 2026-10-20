@@ -297,11 +297,11 @@ def quiet(cfg, last=None):
     return c.img
 
 
-def message(cfg, title, lines, qr_data=None):
+def message(cfg, title, lines, qr_data=None, header="SETUP"):
     """Setup and status screens."""
     c = Canvas(cfg.get("orientation", "landscape"))
     accent = ACCENTS.get(cfg.get("accent"), RED)
-    y = _header(c, "SETUP", "", accent) + 36
+    y = _header(c, header, "", accent) + 36
     inner = c.w - 2 * c.m
     qr_size = 0
     qr_img = None

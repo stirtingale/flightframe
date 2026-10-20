@@ -38,6 +38,37 @@ def online():
         return False
 
 
+def connected():
+    """True when wlan0 (or any device) is joined to a network, hotspot aside.
+    Used to tell 'Wi-Fi is down' apart from 'the internet or a service is down'."""
+    if not available():
+        return True
+    try:
+        out = _nmcli("-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", timeout=10)
+    except Exception:
+        return False
+    for line in out.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 4 and parts[2] == "connected" and parts[3] != HOTSPOT_CON \
+                and parts[1] in ("wifi", "ethernet"):
+            return True
+    return False
+
+
+def try_saved_networks(wait=40):
+    """Drop the hotspot and let NetworkManager rejoin a saved network.
+    Returns True if it got back online; otherwise the caller restarts the hotspot."""
+    if not available():
+        return True
+    stop_hotspot()
+    end = time.time() + wait
+    while time.time() < end:
+        time.sleep(4)
+        if connected():
+            return True
+    return False
+
+
 def hotspot_active():
     if not available():
         return False
@@ -48,13 +79,14 @@ def hotspot_active():
         return False
 
 
-def wait_for_network(seconds=45):
+def wait_for_network(seconds=90):
+    """At boot: wait for Wi-Fi to join. A slow internet check doesn't count as offline."""
     end = time.time() + seconds
     while time.time() < end:
-        if online():
+        if connected():
             return True
         time.sleep(3)
-    return online()
+    return connected()
 
 
 def scan():

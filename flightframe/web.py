@@ -173,6 +173,13 @@ button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line
 .toast{background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:10px;margin-bottom:14px;font-size:14px}
 .nets li{display:flex;justify-content:space-between}
 .stack>*+*{margin-top:10px}
+.sources{list-style:none;margin:0;padding:0}
+.sources li{padding:8px 0;border-top:1px solid var(--line);font-size:14px;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.sources li:first-child{border-top:0}
+.pill{font-size:12px;font-weight:600;padding:2px 8px;border-radius:99px;background:var(--line)}
+.pill.ok{background:#d8f0dd;color:#185c2a}.pill.paused{background:#fbecc8;color:#6b4a00}.pill.failing{background:#f8d7d3;color:#8a1c12}
+@media (prefers-color-scheme:dark){.pill.ok{background:#1f3b26;color:#9fe0ae}.pill.paused{background:#3f3416;color:#f3d48a}.pill.failing{background:#4a1f1b;color:#f4a79e}}
+a{color:inherit}
 </style></head>
 <body><main>
 <header><h1>Your sky</h1><span class="status" id="status"></span></header>
@@ -197,6 +204,19 @@ button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line
   <img class="screen {{ cfg.orientation }}" src="/screen.png" id="shot" alt="Current screen"
        onerror="this.replaceWith(Object.assign(document.createElement('p'),{textContent:'Nothing drawn yet.'}))">
   <form method="post" action="/refresh" style="margin-top:12px"><button class="ghost">Refresh now</button></form>
+</section>
+
+<section>
+  <h2>Flight data</h2>
+  {% if s.offline_since %}<p style="margin-top:0">No data since {{ s.offline_since }}. The frame keeps trying by itself.</p>{% endif %}
+  <ul class="sources">
+  {% for src in s.sources %}
+    <li><span class="pill {{ src.state }}">{{ {'ok':'Working','paused':'Paused','failing':'Not answering','standby':'Standby'}[src.state] }}</span>
+      <strong>{{ src.name }}</strong>
+      <span class="hint">{% if src.state == 'paused' %}{{ src.error }}{% if src.resumes %} (until {{ src.resumes }}){% endif %}{% elif src.state == 'failing' %}{{ src.error }}{% elif src.last_ok %}last answered {{ src.last_ok }}{% else %}used if the others are down{% endif %}</span></li>
+  {% endfor %}
+  </ul>
+  <p class="hint" style="margin:10px 0 0">Aircraft positions from <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a> and <a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a>, routes from <a href="https://www.adsbdb.com" target="_blank" rel="noopener">adsbdb</a>. Free community services for personal use.</p>
 </section>
 
 <form method="post" action="/settings">
@@ -268,7 +288,7 @@ button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line
 <script>
 const $ = s => document.querySelector(s);
 const labels = {flight:"Showing a flight", quiet:"Quiet skies", needs_location:"Needs a location",
-  setup:"Wi-Fi setup", joining:"Joining Wi-Fi", quiet_hours:"Quiet hours", feed_error:"Flight data unreachable",
+  setup:"Wi-Fi setup", joining:"Joining Wi-Fi", quiet_hours:"Quiet hours", feed_error:"Waiting for flight data",
   starting:"Starting", online:"Online", offline:"Offline"};
 async function status(){
   try{

@@ -42,6 +42,10 @@ class Worker:
         self.last_seen = ""
         self.fail_since = None
         self.setup_mode = False
+        self.setup_since = 0.0
+        self.last_rejoin = 0.0
+        self.wifi_down_since = None
+        self.joining = False
         self._shown_message = None
         self._lock = threading.Lock()
 
@@ -76,6 +80,9 @@ class Worker:
             "last_render": datetime.fromtimestamp(self.last_render).strftime("%H:%M:%S")
             if self.last_render else "",
             "display": self.display.name,
+            "sources": self.source.feed_status() if hasattr(self.source, "feed_status") else [],
+            "offline_since": datetime.fromtimestamp(self.fail_since).strftime("%H:%M")
+            if self.fail_since else "",
         }
 
     # ---- drawing ---------------------------------------------------------
@@ -88,10 +95,10 @@ class Worker:
             self.last_key = key
             self.last_render = time.time()
 
-    def _message(self, cfg, key, title, lines, qr=None):
+    def _message(self, cfg, key, title, lines, qr=None, header="SETUP"):
         if self._shown_message == key and not self.force:
             return
-        self._show(render.message(cfg, title, lines, qr), "msg:" + key)
+        self._show(render.message(cfg, title, lines, qr, header=header), "msg:" + key)
         self._shown_message = key
         self.force = False
 
@@ -105,16 +112,25 @@ class Worker:
             self.status, self.detail = "offline", str(e)
             return
         self.setup_mode = True
+        self.setup_since = time.time()
+        self.last_rejoin = time.time()
         self.status = "setup"
         lines = ([note] if note else []) + [
             f"Join the Wi-Fi network {ssid} (password {pw}).",
             f"Then open http://{wifi.HOTSPOT_IP} and choose your home Wi-Fi.",
         ]
-        self.force = True
+        # _message only redraws when the screen's content actually changes
         self._message(cfg, "setup:" + note, "Connect me to Wi-Fi", lines,
                       qr=f"WIFI:T:WPA;S:{ssid};P:{pw};;")
 
     def _join_wifi(self, ssid, password):
+        self.joining = True
+        try:
+            self._join_wifi_inner(ssid, password)
+        finally:
+            self.joining = False
+
+    def _join_wifi_inner(self, ssid, password):
         time.sleep(2)   # let the web page answer before the hotspot drops
         cfg = config.load()
         self.status, self.detail = "joining", ssid
@@ -140,12 +156,61 @@ class Worker:
             except Exception:
                 log.exception("tick failed")
             cfg = config.load()
-            self.wake.wait(max(10, int(cfg.get("poll_seconds") or 30)))
+            self.wake.wait(self._next_wait(cfg))
             self.wake.clear()
+
+    def _next_wait(self, cfg):
+        base = max(10, int(cfg.get("poll_seconds") or 30))
+        if not self.fail_since:
+            return base
+        # While nothing answers, ease off: 30 s for the first 5 min, then 1, then 2 min.
+        down = time.time() - self.fail_since
+        return base if down < 300 else (60 if down < 1800 else 120)
+
+    # ---- outages ------------------------------------------------------
+    OUTAGE_SCREEN_AFTER = 45 * 60      # keep the last picture this long
+    HOTSPOT_AFTER = 30 * 60            # Wi-Fi itself down this long: offer setup
+
+    def _outage(self, cfg, why):
+        now = time.time()
+        self.status, self.detail = "feed_error", why
+        if not self.fail_since:
+            self.fail_since = now
+            log.warning("flight data unavailable: %s", why)
+        if wifi.available() and not wifi.connected():
+            self.wifi_down_since = self.wifi_down_since or now
+            if now - self.wifi_down_since > self.HOTSPOT_AFTER:
+                self._enter_setup(cfg, note="Couldn't reach your Wi-Fi.")
+            return
+        self.wifi_down_since = None
+        if now - self.fail_since < self.OUTAGE_SCREEN_AFTER:
+            return                          # short blip: leave the current screen alone
+        since = datetime.fromtimestamp(self.fail_since).strftime("%H:%M")
+        self._message(cfg, "outage", "Waiting for flight data",
+                      [f"The flight data services haven't answered since {since}.",
+                       "The frame keeps trying and will pick up again by itself.",
+                       "Details: http://flightframe.local"], header="STATUS")
+
+    def _maybe_rejoin(self, cfg):
+        """In setup mode, every 10 minutes see if the home Wi-Fi is back."""
+        if self.joining or time.time() - self.last_rejoin < 600:
+            return
+        self.last_rejoin = time.time()
+        log.info("setup mode: trying saved Wi-Fi networks")
+        if wifi.try_saved_networks():
+            log.info("rejoined Wi-Fi, leaving setup mode")
+            self.setup_mode = False
+            self.status, self.detail = "online", ""
+            self.fail_since = None
+            self.force = True
+            self._shown_message = None
+        else:
+            self._enter_setup(cfg, note="Couldn't reach your Wi-Fi.")
 
     def _tick(self):
         cfg = config.load()
         if self.setup_mode:
+            self._maybe_rejoin(cfg)
             return
         if not config.has_location(cfg):
             self.status = "needs_location"
@@ -160,19 +225,16 @@ class Worker:
 
         try:
             flight, nearby = self.source.overhead(cfg)
-            self.fail_since = None
         except ConnectionError as e:
-            self.status, self.detail = "feed_error", str(e)
-            self.fail_since = self.fail_since or time.time()
-            if time.time() - self.fail_since > 600:
-                if wifi.available() and not wifi.online():
-                    self._enter_setup(cfg, note="Lost the internet connection.")
-                else:
-                    self._message(cfg, "feed", "No flight data",
-                                  ["The flight data service isn't answering.",
-                                   "Retrying every minute."])
+            self._outage(cfg, str(e))
             return
 
+        if self.fail_since:
+            log.info("flight data back after %d min", (time.time() - self.fail_since) // 60)
+            self.fail_since = None
+            self.wifi_down_since = None
+            if self._shown_message:          # an outage screen is up: replace it now
+                self.force = True
         self.flight, self.nearby = flight, nearby
         self.status = "flight" if flight else "quiet"
         self.detail = ""
