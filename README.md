@@ -33,6 +33,25 @@ It's set up from your phone, with no app, no account and no subscription. The pa
 | An A380 at cruise | No published route, no logo: accent-coloured tail |
 | ![Quiet skies](docs/images/screen-quiet.png) | <img src="docs/images/screen-portrait.png" alt="Portrait layout" width="160"> |
 | Nothing in range | Portrait layout |
+| ![Two aircraft overhead](docs/images/screen-duo.png) | ![Radar](docs/images/screen-radar.png) |
+| Two overhead at once | Radar (button B) |
+| ![Flight tracker](docs/images/screen-tracker.png) | ![Night](docs/images/screen-night.png) |
+| Following one flight on the map (button C) | After sunset |
+
+### Day and night
+
+After sunset the whole screen turns dark, with the aircraft in white. The sky around it shows tonight's moon in its real phase, stars on a clear night, and rain or snow when it's falling. By day there's a small sun or cloud for the weather now. Green and blue accents switch to yellow at night, because dark inks barely show on black. You can keep it always light or always dark instead.
+
+| | |
+|---|---|
+| ![Quiet night with the moon](docs/images/screen-night-quiet.png) | ![Two aircraft in the rain at night](docs/images/screen-night-rain.png) |
+| A clear night | Rain |
+
+### Compass, radar and tracker
+
+- **Compass:** the small dial beside the distance points to the aircraft. Tell the settings page which way you face when you look at the frame and the dial (and the radar) turn to match your room, so "up" means "straight ahead through the wall". No extra hardware needed.
+- **Radar:** every aircraft within 40 km (adjustable), with heading ticks, labels for the nearest ten and a list of the closest. Button B flips between it and the sky.
+- **Tracker:** type a flight number (BA283 or BAW283) or registration (G-XWBA) on the settings page. The map shows the route, the path flown so far and where it is now, with altitude, speed and time left, updated every 5 minutes. Button C flips between it and the sky. It goes back to the sky by itself 30 minutes after landing. The map is drawn from built-in coastlines, so it needs no map service.
 
 ### Aircraft drawings
 
@@ -156,7 +175,8 @@ The first flight appears within a minute or so of saving.
 | Button | Does |
 |---|---|
 | A (top) | Refresh now |
-| B, C | Spare |
+| B | Sky above or radar |
+| C | Tracked flight or sky above (shows how to add a flight if none is set) |
 | D (bottom) | Show the settings address with a QR code. Press A to go back. |
 
 ![Settings QR screen](docs/images/screen-settings-qr.png)
@@ -171,7 +191,9 @@ You can set:
 
 - **Location:** an address, postcode or pasted `lat, lon`, plus the name shown in the footer
 - **Range:** how far out counts as overhead, and an altitude ceiling
-- **Look:** metric or imperial, landscape or portrait, normal or upside down, aircraft drawing on or off, 12-hour forecast or sun times only, accent colour (green by default, which looks British racing green on the paper)
+- **Screen:** sky above, radar or tracker (the same as buttons B and C)
+- **Track a flight:** a flight number or registration to follow on the map
+- **Look:** metric or imperial, landscape or portrait, normal or upside down, aircraft drawing on or off, 12-hour forecast or sun times only, dark after sunset (or always light or dark), one or two aircraft, which way you face when looking at the frame, radar range, accent colour (green by default, which looks British racing green on the paper)
 - **Refresh:** the minimum gap before a new flight is drawn, how often height and speed update, and quiet hours
 
 The page also shows a live preview of what's on the paper.
@@ -180,7 +202,9 @@ The page also shows a live preview of what's on the paper.
 
 - Every 30 seconds it asks [adsb.fi](https://adsb.fi) for aircraft near you, then looks up the airline, route and aircraft on [adsbdb](https://www.adsbdb.com). If adsb.fi is down it falls back to [adsb.lol](https://adsb.lol), which allows only 500 requests a day per connection, so it's kept for emergencies.
 - Each source is treated politely. A "slow down" reply (HTTP 429) pauses that source for exactly as long as it asks, a refusal pauses it for 6 hours, and timeouts back off from 30 seconds up to 5 minutes. While nothing answers, the frame polls less often. The settings page shows each source's status.
-- It picks the nearest aircraft within range, measured on the slant, so a jet directly overhead beats a light aircraft a few miles off. If a flight with a known route is nearly as close, it prefers that one.
+- It picks the nearest aircraft within range, measured on the slant, so a jet directly overhead beats a light aircraft a few miles off. If a flight with a known route is nearly as close, it prefers that one. With two in range, both are shown. The same single request also feeds the radar.
+- **Night** starts at sunset and ends at sunrise, both worked out on the Pi. The moon's phase is calculated too.
+- **The tracker** looks the flight number up on adsbdb (which turns BA283 into the BAW283 that aircraft broadcast), then asks adsb.fi where that callsign is every 5 minutes. Its path is remembered in `/var/lib/flightframe/track.json`, so it survives a restart. Over oceans there are few receivers, so a long-haul flight can drop out for a while; the map shows its last position until it reappears.
 - Colour E Ink takes about 30 seconds per refresh and shouldn't refresh more often than every 3 minutes. So the paper only redraws when a **different** flight is overhead, or every 10 minutes to update height and speed. With no power, it keeps its last picture.
 - Everything is drawn in the panel's six exact colours with no anti-aliasing, so text stays crisp and nothing gets dithered.
 - **Aircraft drawings** are built from each type's dimensions in [`flightframe/data/airframes.json`](flightframe/data/airframes.json) (generated from [`tools/build_airframes.py`](tools/build_airframes.py)). Unknown type codes use the closest match (a `B739ER` draws as a `B739`), then the broadcast category. The archive is refreshed from GitHub once a day, and a copy ships with the app.
@@ -244,6 +268,9 @@ flightframe/
   app.py       main loop: when to poll and when the paper is worth refreshing
   flights.py   ADS-B feeds, nearest-aircraft choice, route and aircraft lookup
   render.py    the screens, drawn in the panel's exact six colours
+  sky.py       night mode, moon phase, stars and rain
+  trackmap.py  the flight tracker map
+  data/coast.json      coastlines and borders for the map (Natural Earth)
   plane.py     renders aircraft drawings, with the logo fitted into the tail fin
   airframes.py builds each type's drawing from its dimensions; daily archive refresh
   data/airframes.json  the aircraft archive (200+ types)
@@ -263,6 +290,7 @@ docs/images/   README images
 
 - Aircraft positions: [adsb.fi](https://adsb.fi) (primary) and [adsb.lol](https://adsb.lol) (fallback), community ADS-B networks. Both are free for **personal, non-commercial use**, and adsb.fi asks to be credited, as it is here and on the settings page. If you have a receiver, consider [feeding adsb.fi](https://adsb.fi): feeders also get higher limits.
 - Routes and aircraft: [adsbdb](https://www.adsbdb.com).
+- Map: coastlines and borders from [Natural Earth](https://www.naturalearthdata.com) (public domain), simplified by `tools/build_coast.py`.
 - Weather: [MET Norway](https://api.met.no) (CC BY 4.0) and [Open-Meteo](https://open-meteo.com) (CC BY 4.0).
 - Aircraft drawings: original line drawings generated from approximate published dimensions.
 - Airline logos: [Jxck-S/airline-logos](https://github.com/Jxck-S/airline-logos) and Kiwi.com. Logos remain their airlines' trademarks. They're downloaded at run time for display on your own frame and are not included in this repository.

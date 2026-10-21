@@ -1,16 +1,21 @@
 """Main loop: watch the sky, decide when the paper is worth refreshing."""
 import argparse
+import json
 import logging
+import os
 import socket
 import threading
 import time
 from datetime import datetime
 
-from . import airframes, config, logos, render, weather, wifi
+from . import airframes, config, logos, render, trackmap, weather, wifi
 from .display import make_display
-from .flights import FlightSource
+from .flights import FlightSource, haversine_km
 
 log = logging.getLogger("flightframe")
+TRACK_PATH = os.path.join(config.STATE_DIR, "track.json")
+TRACK_EVERY = 5 * 60          # tracked flight: new position every 5 minutes
+LANDED_FOR = 30 * 60          # show "Landed" this long, then back to the sky
 
 
 def in_quiet_hours(cfg, now=None):
@@ -37,7 +42,10 @@ class Worker:
         self.status = "starting"
         self.detail = ""
         self.flight = None
+        self.flights = []
+        self.contacts = []
         self.nearby = 0
+        self.track = self._load_track()
         self.last_key = None
         self.last_render = 0.0
         self.last_seen = ""
@@ -57,6 +65,40 @@ class Worker:
 
     def join_wifi(self, ssid, password):
         threading.Thread(target=self._join_wifi, args=(ssid, password), daemon=True).start()
+
+    def set_screen(self, screen):
+        cfg = config.load()
+        if screen == "track" and not cfg.get("track"):
+            screen = "sky"
+        cfg["screen"] = screen
+        config.save(cfg)
+        self.poke(force=True)
+
+    def toggle_radar(self):
+        """Button B: sky <-> radar."""
+        cfg = config.load()
+        self.set_screen("sky" if cfg.get("screen") == "radar" else "radar")
+
+    def toggle_track(self):
+        """Button C: the tracked flight, or back to the sky."""
+        cfg = config.load()
+        if not cfg.get("track"):
+            url = settings_url()
+            self._show(render.message(cfg, "No flight to track", [
+                "Add a flight number on the settings page:", url,
+                "Then press this button again."], url, header="TRACKER"), "msg:notrack")
+            return
+        self.set_screen("sky" if cfg.get("screen") == "track" else "track")
+
+    def set_track(self, query):
+        query = query.strip().upper()[:12]
+        cfg = config.load()
+        cfg["track"] = query
+        cfg["screen"] = "track" if query else "sky"
+        config.save(cfg)
+        self.track = self._new_track(query)
+        self._save_track()
+        self.poke(force=True)
 
     def show_settings_screen(self):
         cfg = config.load()
@@ -84,7 +126,49 @@ class Worker:
             "sources": self.source.feed_status() if hasattr(self.source, "feed_status") else [],
             "offline_since": datetime.fromtimestamp(self.fail_since).strftime("%H:%M")
             if self.fail_since else "",
+            "screen": config.load().get("screen", "sky"),
+            "track": self._track_summary(),
         }
+
+    # ---- tracked flight ----------------------------------------------------
+    @staticmethod
+    def _new_track(query):
+        return {"query": query, "trail": [], "route": {}, "last_seen": 0, "landed_at": 0,
+                "last_poll": 0, "state": "waiting", "flight": None}
+
+    def _load_track(self):
+        try:
+            with open(TRACK_PATH) as f:
+                t = json.load(f)
+            t.update(last_poll=0, flight=None)
+            t["trail"] = [tuple(p) for p in t.get("trail", [])]
+            return t
+        except (OSError, ValueError):
+            return self._new_track("")
+
+    def _save_track(self):
+        t = {k: v for k, v in self.track.items() if k not in ("flight", "last_poll")}
+        try:
+            os.makedirs(config.STATE_DIR, exist_ok=True)
+            with open(TRACK_PATH + ".tmp", "w") as f:
+                json.dump(t, f)
+            os.replace(TRACK_PATH + ".tmp", TRACK_PATH)
+        except OSError as e:
+            log.info("could not save track: %s", e)
+
+    def _track_summary(self):
+        t = self.track
+        if not t.get("query"):
+            return None
+        f = t.get("flight")
+        out = {"query": t["query"], "state": t.get("state", "waiting"),
+               "last_seen": datetime.fromtimestamp(t["last_seen"]).strftime("%H:%M") if t.get("last_seen") else ""}
+        if f:
+            out.update(altitude_ft=f.altitude_ft, lat=round(f.lat, 3), lon=round(f.lon, 3))
+        r = t.get("route") or {}
+        if r.get("origin") and r.get("destination"):
+            out["route"] = f"{r['origin'].get('iata_code')} → {r['destination'].get('iata_code')}"
+        return out
 
     # ---- drawing ---------------------------------------------------------
     def _show(self, img, key):
@@ -240,11 +324,18 @@ class Worker:
             self.status = "quiet_hours"
             return
 
+        screen = cfg.get("screen", "sky")
+        if screen == "track" and cfg.get("track"):
+            self._tick_track(cfg)
+            return
+        radar = screen == "radar"
+        want = 2 if cfg.get("duo", True) else 1
         try:
-            flight, nearby = self.source.overhead(cfg)
+            flights, nearby, contacts = self.source.scan(cfg, want=want, radar=radar)
         except ConnectionError as e:
             self._outage(cfg, str(e))
             return
+        flight = flights[0] if flights else None
 
         if self.fail_since:
             log.info("flight data back after %d min", (time.time() - self.fail_since) // 60)
@@ -252,7 +343,7 @@ class Worker:
             self.wifi_down_since = None
             if self._shown_message:          # an outage screen is up: replace it now
                 self.force = True
-        self.flight, self.nearby = flight, nearby
+        self.flight, self.flights, self.nearby, self.contacts = flight, flights, nearby, contacts
         self.status = "flight" if flight else "quiet"
         self.detail = ""
         if flight:
@@ -261,7 +352,12 @@ class Worker:
                 if flight.has_route else ""
             self.last_seen = f"{flight.flight_number}{route} at {when}"
 
-        key = flight.hex if flight else "quiet"
+        night = render.is_night(cfg)
+        if radar:
+            key = "radar"
+        else:
+            key = "+".join(f.hex for f in flights) if flights else "quiet"
+        key += ":night" if night else ":day"
         since = time.time() - self.last_render
         min_gap = max(60, int(cfg.get("min_refresh_seconds") or 180))
         restats = int(cfg.get("stats_refresh_minutes") or 10) * 60
@@ -274,15 +370,75 @@ class Worker:
             return
         self.force = False
         self._shown_message = None
-        if flight:
-            logo = None
-            if cfg.get("show_plane", True):
-                logo = logos.get(logos.airline_icao(flight.callsign, flight.airline_icao),
-                                 flight.airline_iata, session=self.source.s)
-            img = render.poster(flight, cfg, nearby, logo=logo, wx=self._wx(cfg))
+        if radar:
+            img = render.radar(contacts, cfg, wx=self._wx(cfg), highlight=flight)
+        elif len(flights) >= 2:
+            img = render.duo(flights, cfg, nearby, logos=[self._logo(cfg, f) for f in flights[:2]],
+                             wx=self._wx(cfg))
+        elif flight:
+            img = render.poster(flight, cfg, nearby, logo=self._logo(cfg, flight), wx=self._wx(cfg))
         else:
             img = render.quiet(cfg, self.last_seen if self.last_seen else None, wx=self._wx(cfg))
         self._show(img, key)
+
+    def _logo(self, cfg, f):
+        if not cfg.get("show_plane", True):
+            return None
+        return logos.get(logos.airline_icao(f.callsign, f.airline_icao), f.airline_iata,
+                         session=self.source.s)
+
+    def _tick_track(self, cfg):
+        """Follow one flight on the map, with a new position every 5 minutes."""
+        query = cfg["track"]
+        t = self.track
+        if t.get("query") != query:
+            t = self.track = self._new_track(query)
+        now = time.time()
+        if not self.force and now - t["last_poll"] < TRACK_EVERY and (self.last_key or "").startswith("track:"):
+            return
+        t["last_poll"] = now
+        try:
+            f, route = self.source.find(query, float(cfg["lat"]), float(cfg["lon"]))
+        except ConnectionError as e:
+            self.status, self.detail = "feed_error", str(e)
+            if self.last_key and self.last_key.startswith("track:") and not self.force:
+                return                      # keep the last map up until a source answers
+            f, route = None, {}
+        self.force = False
+        self._shown_message = None
+        if route:
+            t["route"] = route
+        route = t["route"]
+        dest = (route or {}).get("destination") or {}
+        if f:
+            t["flight"], t["last_seen"] = f, now
+            if not t["trail"] or t["trail"][-1] != (f.lat, f.lon):
+                t["trail"].append((round(f.lat, 4), round(f.lon, 4)))
+                t["trail"] = t["trail"][-400:]
+            low = (f.altitude_ft or 0) < 300 and (f.speed_kt or 0) < 80
+            t["state"] = "landed" if low else "live"
+        elif t["trail"]:
+            last = t["trail"][-1]
+            near = dest.get("latitude") is not None and \
+                haversine_km(last[0], last[1], dest["latitude"], dest["longitude"]) < 40
+            descending = t["flight"] is not None and (t["flight"].altitude_ft or 99999) < 5000
+            gone = now - t["last_seen"]
+            t["state"] = "landed" if (near or (descending and gone > 600)) else "lost"
+        else:
+            t["state"] = "waiting" if route else "unknown"
+        if t["state"] == "landed":
+            t["landed_at"] = t["landed_at"] or t["last_seen"] or now
+            if now - t["landed_at"] > LANDED_FOR:
+                log.info("tracked flight %s has landed; back to the sky", query)
+                self.set_track("")
+                return
+        self._save_track()
+        self.status = "tracking"
+        seen = t["landed_at"] if t["state"] == "landed" else t["last_seen"]
+        img = trackmap.tracker(cfg, query, t["flight"] if t["state"] != "live" else f,
+                               route=route, trail=t["trail"], state=t["state"],
+                               seen_at=trackmap.time_of(seen), wx=self._wx(cfg))
+        self._show(img, f"track:{query}")
 
 
 def main():

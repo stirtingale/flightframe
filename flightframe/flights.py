@@ -11,6 +11,7 @@ source is never hammered, and the next one is tried straight away.
 """
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -22,12 +23,14 @@ UA = {"User-Agent": "flightframe-pi/1.1 (personal flight display)"}
 KM_PER_NM = 1.852
 
 ADSBDB = "https://api.adsbdb.com/v0/aircraft/{hex}?callsign={callsign}"
+ADSBDB_CALLSIGN = "https://api.adsbdb.com/v0/callsign/{callsign}"
 
 
 @dataclass
 class Feed:
     name: str
-    url: str
+    url: str                       # aircraft near a point
+    base: str = ""                 # for lookups by callsign or registration
     daily_budget: int = 0          # 0 = no cap
     paused_until: float = 0.0
     fails: int = 0
@@ -62,10 +65,11 @@ class Feed:
 
 def default_feeds():
     return [
-        Feed("adsb.fi", "https://opendata.adsb.fi/api/v3/lat/{lat:.4f}/lon/{lon:.4f}/dist/{nm}"),
+        Feed("adsb.fi", "https://opendata.adsb.fi/api/v3/lat/{lat:.4f}/lon/{lon:.4f}/dist/{nm}",
+             "https://opendata.adsb.fi/api/v2"),
         # 500 a day per connection; keep some headroom
         Feed("adsb.lol", "https://api.adsb.lol/v2/lat/{lat:.4f}/lon/{lon:.4f}/dist/{nm}",
-             daily_budget=450),
+             "https://api.adsb.lol/v2", daily_budget=450),
     ]
 
 
@@ -107,7 +111,7 @@ class Flight:
     airline_icao: str = ""
     category: str = ""
     flight_iata: str = ""
-    origin: dict = field(default_factory=dict)       # iata, icao, city, name, country
+    origin: dict = field(default_factory=dict)       # iata, icao, city, name, country, lat, lon
     destination: dict = field(default_factory=dict)
 
     @property
@@ -158,15 +162,26 @@ class FlightSource:
     # ---- positions -------------------------------------------------------
     def aircraft_near(self, lat, lon, radius_km):
         nm = max(1, min(250, math.ceil(radius_km / KM_PER_NM)))
+        return self._ask(lambda feed: feed.url.format(lat=lat, lon=lon, nm=nm))
+
+    def aircraft_by(self, kind, value):
+        """kind: "callsign" or "registration". Returns the raw aircraft list."""
+        value = value.strip().upper()
+        return self._ask(lambda feed: f"{feed.base}/{kind}/{value}" if feed.base else None)
+
+    def _ask(self, url_for):
         now = time.time()
         tried = []
         for feed in self.feeds:
             if not feed.available(now):
                 continue
+            url = url_for(feed)
+            if not url:
+                continue
             tried.append(feed.name)
             feed.used_today += 1
             try:
-                r = self.s.get(feed.url.format(lat=lat, lon=lon, nm=nm), timeout=(5, 12))
+                r = self.s.get(url, timeout=(5, 12))
             except requests.RequestException as e:
                 self._failed(feed, f"{type(e).__name__}", now)
                 continue
@@ -239,32 +254,102 @@ class FlightSource:
 
     # ---- the one that matters -------------------------------------------
     def overhead(self, cfg):
+        flights, n, _ = self.scan(cfg, want=1)
+        return (flights[0] if flights else None), n
+
+    def scan(self, cfg, want=2, radar=False):
+        """One request for everything: (overhead flights, how many overhead, radar contacts).
+
+        overhead: up to `want` aircraft within the overhead radius, best first, with
+        routes looked up. radar: every airborne aircraft within the radar range
+        (only filled when radar=True), nearest first.
+        """
         lat, lon = float(cfg["lat"]), float(cfg["lon"])
         radius = float(cfg.get("radius_km") or 15)
+        radar_km = float(cfg.get("radar_km") or 40)
         max_alt = float(cfg.get("max_altitude_ft") or 0)
-        candidates = []
-        for ac in self.aircraft_near(lat, lon, radius):
-            f = _parse(ac, lat, lon)
-            if not f or f.distance_km > radius:
+        reach = max(radius, radar_km) if radar else radius
+        everyone, candidates = [], []
+        for ac in self.aircraft_near(lat, lon, reach):
+            f = _parse(ac, lat, lon, need_callsign=not radar)
+            if not f:
+                continue
+            if f.distance_km <= radar_km:
+                everyone.append(f)
+            if not f.callsign or f.distance_km > radius:
                 continue
             if max_alt and f.altitude_ft and f.altitude_ft > max_alt:
                 continue
             candidates.append(f)
+        everyone.sort(key=lambda f: f.distance_km)
         if not candidates:
-            return None, 0
-        # Nearest by slant distance, so a jet at 38,000 ft directly above
-        # doesn't lose out to a light aircraft 5 km away at 1,500 ft.
-        def slant(f):
-            h = (f.altitude_ft or 0) * 0.0003048
-            return math.hypot(f.distance_km, h * 0.5)
+            return [], 0, everyone
         candidates.sort(key=slant)
         # Prefer flights we can name a route for, if one is nearly as close.
         best = candidates[0]
         for f in candidates[:4]:
             enrich(f, self.details(f.hex, f.callsign))
             if f.has_route and slant(f) <= slant(best) * 1.6 + 1:
-                return f, len(candidates)
-        return best, len(candidates)
+                best = f
+                break
+        picked = [best]
+        for f in candidates:
+            if len(picked) >= want:
+                break
+            if f is not best:
+                enrich(f, self.details(f.hex, f.callsign))
+                picked.append(f)
+        return picked, len(candidates), everyone
+
+    # ---- following one flight --------------------------------------------
+    def route_for(self, callsign):
+        """adsbdb route by flight number (IATA "BA283" or ICAO "BAW283"); {} if unknown."""
+        key = ("route", callsign.upper())
+        hit = self._route_cache.get(key)
+        if hit and hit[0] > time.time():
+            return hit[1]
+        out = {}
+        try:
+            r = self.s.get(ADSBDB_CALLSIGN.format(callsign=callsign.upper()), timeout=10)
+            if r.status_code == 200:
+                resp = r.json().get("response")
+                out = resp.get("flightroute") or {} if isinstance(resp, dict) else {}
+        except (requests.RequestException, ValueError) as e:
+            log.info("route lookup failed for %s: %s", callsign, e)
+            return {}
+        self._route_cache[key] = (time.time() + 6 * 3600, out)
+        return out
+
+    def find(self, query, home_lat=0.0, home_lon=0.0):
+        """Where a flight is now. query: flight number (BA283, BAW283) or registration.
+
+        Returns (Flight or None, route dict). Raises ConnectionError if no source answers.
+        """
+        q = query.strip().upper().replace(" ", "")
+        route = {}
+        if "-" in q or re.fullmatch(r"N\d[0-9A-Z]{0,4}", q):      # G-XWBA, N123AB
+            kind, value = "registration", q
+        else:
+            route = self.route_for(q)
+            kind, value = "callsign", (route.get("callsign_icao") or q)
+        found = [f for f in (_parse(ac, home_lat, home_lon, need_callsign=False)
+                             for ac in self.aircraft_by(kind, value)) if f]
+        if not found:
+            return None, route
+        f = found[0]
+        if not route and f.callsign:
+            route = self.route_for(f.callsign)
+        enrich(f, self.details(f.hex, f.callsign) if f.callsign else {})
+        if route:
+            enrich(f, {"flightroute": route})
+        return f, route
+
+
+def slant(f):
+    """Nearest by slant distance, so a jet at 38,000 ft directly above
+    doesn't lose out to a light aircraft 5 km away at 1,500 ft."""
+    h = (f.altitude_ft or 0) * 0.0003048
+    return math.hypot(f.distance_km, h * 0.5)
 
 
 def _num(v):
@@ -274,10 +359,10 @@ def _num(v):
         return None
 
 
-def _parse(ac, home_lat, home_lon):
+def _parse(ac, home_lat, home_lon, need_callsign=True):
     lat, lon = ac.get("lat"), ac.get("lon")
     callsign = (ac.get("flight") or "").strip()
-    if lat is None or lon is None or not callsign:
+    if lat is None or lon is None or (need_callsign and not callsign):
         return None
     if ac.get("alt_baro") == "ground":
         return None
@@ -309,6 +394,8 @@ def _airport(a):
         "city": a.get("municipality") or a.get("name") or "",
         "name": a.get("name") or "",
         "country": a.get("country_name") or "",
+        "lat": _num(a.get("latitude")),
+        "lon": _num(a.get("longitude")),
     }
 
 

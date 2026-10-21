@@ -49,20 +49,41 @@ def create_app(worker):
         num("max_altitude_ft", int, 0, 60000)
         num("min_refresh_seconds", int, 60, 3600)
         num("stats_refresh_minutes", int, 3, 120)
+        num("radar_km", float, 5, 150)
+        num("facing", int, 0, 359)
         for key, allowed in (("units", {"metric", "imperial"}),
                              ("orientation", {"landscape", "portrait"}),
+                             ("night_mode", {"auto", "light", "dark"}),
                              ("accent", set(ACCENTS))):
             if f.get(key) in allowed:
                 cfg[key] = f[key]
         cfg["show_plane"] = f.get("show_plane") == "1"
         cfg["flip"] = f.get("flip") == "1"
         cfg["show_weather"] = f.get("show_weather") == "1"
+        cfg["duo"] = f.get("duo") == "1"
         for key in ("quiet_start", "quiet_end"):
             v = f.get(key, "").strip()
             cfg[key] = v if re.fullmatch(r"\d{2}:\d{2}", v) else ""
         config.save(cfg)
         worker.poke(force=True)
         return redirect("/?saved=1")
+
+    @app.post("/screen")
+    def screen_mode():
+        if request.form.get("screen") in ("sky", "radar", "track"):
+            worker.set_screen(request.form["screen"])
+        return redirect("/")
+
+    @app.post("/track")
+    def track():
+        q = re.sub(r"[^A-Za-z0-9-]", "", request.form.get("flight", ""))[:12]
+        worker.set_track(q)
+        return redirect("/?tracking=" + q if q else "/")
+
+    @app.post("/track/stop")
+    def track_stop():
+        worker.set_track("")
+        return redirect("/")
 
     @app.get("/api/geocode")
     def geocode():
@@ -186,6 +207,7 @@ a{color:inherit}
 <header><h1>Your sky</h1><span class="status" id="status"></span></header>
 
 {% if saved %}<div class="toast">Saved. The frame will refresh in a moment (E Ink takes about 20 seconds).</div>{% endif %}
+{% if request.args.get('tracking') %}<div class="toast">Tracking {{ request.args.get('tracking') }}. The map appears in about 30 seconds and updates every 5 minutes.</div>{% endif %}
 
 {% if s.setup_mode %}
 <section>
@@ -204,7 +226,27 @@ a{color:inherit}
   <h2>On the frame</h2>
   <img class="screen {{ cfg.orientation }}" src="/screen.png" id="shot" alt="Current screen"
        onerror="this.replaceWith(Object.assign(document.createElement('p'),{textContent:'Nothing drawn yet.'}))">
-  <form method="post" action="/refresh" style="margin-top:12px"><button class="ghost">Refresh now</button></form>
+  <form method="post" action="/screen" class="seg" style="margin-top:12px" id="screens">
+    {% for key, name in [('sky','Sky above'),('radar','Radar'),('track','Tracker')] %}
+    <label><input type="radio" name="screen" value="{{ key }}" {{ 'checked' if s.screen==key }} {{ 'disabled' if key=='track' and not cfg.track }} onchange="this.form.submit()"><span>{{ name }}</span></label>
+    {% endfor %}
+  </form>
+  <form method="post" action="/refresh" style="margin-top:10px"><button class="ghost">Refresh now</button></form>
+  <p class="hint" style="margin:10px 0 0">Buttons on the frame: A refresh, B sky or radar, C tracker, D this page's address.</p>
+</section>
+
+<section>
+  <h2>Track a flight</h2>
+  {% if s.track %}
+  <p style="margin-top:0"><strong>{{ s.track.query }}</strong>{% if s.track.route %} · {{ s.track.route }}{% endif %}<br>
+    <span class="hint">{{ {'live':'In the air','waiting':'Not flying yet','landed':'Landed','lost':'Out of range','unknown':'Not found yet'}.get(s.track.state, s.track.state) }}{% if s.track.last_seen %}, last position {{ s.track.last_seen }}{% endif %}</span></p>
+  <form method="post" action="/track/stop" style="margin-bottom:12px"><button class="ghost">Stop tracking</button></form>
+  {% endif %}
+  <form method="post" action="/track" class="stack">
+    <input name="flight" placeholder="Flight number or registration, e.g. BA283 or G-XWBA" autocapitalize="characters" autocomplete="off" required>
+    <button>Show it on the map</button>
+  </form>
+  <p class="hint" style="margin:10px 0 0">The map shows the route, the path flown so far, and where it is now, updated every 5 minutes. It goes back to the sky 30 minutes after landing.</p>
 </section>
 
 <section>
@@ -264,6 +306,25 @@ a{color:inherit}
     <label><input type="radio" name="show_weather" value="1" {{ 'checked' if cfg.show_weather }}><span>12-hour forecast</span></label>
     <label><input type="radio" name="show_weather" value="0" {{ 'checked' if not cfg.show_weather }}><span>Sun times only</span></label>
   </div>
+  <label>Night</label>
+  <div class="seg">
+    <label><input type="radio" name="night_mode" value="auto" {{ 'checked' if cfg.night_mode=='auto' }}><span>Dark after sunset</span></label>
+    <label><input type="radio" name="night_mode" value="light" {{ 'checked' if cfg.night_mode=='light' }}><span>Always light</span></label>
+    <label><input type="radio" name="night_mode" value="dark" {{ 'checked' if cfg.night_mode=='dark' }}><span>Always dark</span></label>
+  </div>
+  <label>Two aircraft overhead</label>
+  <div class="seg">
+    <label><input type="radio" name="duo" value="1" {{ 'checked' if cfg.duo }}><span>Show both</span></label>
+    <label><input type="radio" name="duo" value="0" {{ 'checked' if not cfg.duo }}><span>Nearest only</span></label>
+  </div>
+  <label for="facing">When you look at the frame, you face <span class="hint">turns the compass and radar to match the room</span></label>
+  <select id="facing" name="facing">
+    {% for deg, name in [(0,'North'),(45,'North-east'),(90,'East'),(135,'South-east'),(180,'South'),(225,'South-west'),(270,'West'),(315,'North-west')] %}
+    <option value="{{ deg }}" {{ 'selected' if (cfg.facing|int) == deg }}>{{ name }}</option>
+    {% endfor %}
+  </select>
+  <label for="radar">Radar range <span class="hint">km</span></label>
+  <input id="radar" name="radar_km" type="number" min="5" max="150" step="5" value="{{ cfg.radar_km|int }}">
   <label>Accent colour</label>
   <div class="swatches">
     {% set hex = {'red':'#c4342c','blue':'#263e8c','green':'#225c3a','yellow':'#e8c83a'} %}
@@ -295,7 +356,7 @@ a{color:inherit}
 const $ = s => document.querySelector(s);
 const labels = {flight:"Showing a flight", quiet:"Quiet skies", needs_location:"Needs a location",
   setup:"Wi-Fi setup", joining:"Joining Wi-Fi", quiet_hours:"Quiet hours", feed_error:"Waiting for flight data",
-  starting:"Starting", online:"Online", offline:"Offline"};
+  starting:"Starting", online:"Online", offline:"Offline", tracking:"Tracking a flight"};
 async function status(){
   try{
     const s = await (await fetch('/api/status')).json();

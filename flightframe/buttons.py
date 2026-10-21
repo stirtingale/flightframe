@@ -1,8 +1,8 @@
 """The four buttons on the side of the Inky Impression.
 
   A (top)     refresh the screen now
-  B           (spare)
-  C           (spare)
+  B           switch between the sky above and the radar
+  C           show the flight you're tracking (press again for the sky)
   D (bottom)  show the settings page address and QR code
 
 Pin numbers are from Pimoroni's examples (BCM 5, 6, 16, 24). Does nothing if the
@@ -48,6 +48,10 @@ def start(worker):
                     log.info("button %s", label)
                     if label == "A":
                         worker.poke(force=True)
+                    elif label == "B":
+                        worker.toggle_radar()
+                    elif label == "C":
+                        worker.toggle_track()
                     elif label == "D":
                         worker.show_settings_screen()
             except Exception:
@@ -56,5 +60,5 @@ def start(worker):
 
     t = threading.Thread(target=loop, daemon=True, name="buttons")
     t.start()
-    log.info("buttons ready (A refresh, D settings)")
+    log.info("buttons ready (A refresh, B radar, C tracker, D settings)")
     return t

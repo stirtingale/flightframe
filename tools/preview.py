@@ -58,6 +58,43 @@ SAMPLES = {
 }
 
 
+RADAR = [  # (callsign, type, alt ft, km, bearing, track)
+    ("BAW283", "A35K", 36975, 3.2, 40, 280), ("EZY63LK", "A20N", 8400, 9.8, 300, 150),
+    ("RYR4TX", "B38M", 34000, 14.5, 120, 300), ("UAE19", "A388", 38000, 21.0, 70, 110),
+    ("LOG6KP", "AT76", 14000, 26.0, 200, 20), ("HLE65", "EC35", 1500, 6.1, 220, 260),
+    ("VIR3", "B789", 39000, 33.0, 340, 270), ("DLH9CR", "A321", 31000, 37.5, 160, 95),
+    ("KLM74P", "E190", 22000, 18.2, 255, 70), ("", "C172", 2500, 11.0, 15, 200),
+]
+
+
+def sample_radar():
+    out = []
+    for i, (cs, t, alt, km, brg, trk) in enumerate(RADAR):
+        out.append(_f(hex=f"40{i:04x}", callsign=cs, type_code=t, altitude_ft=alt, distance_km=km,
+                      bearing=brg, track=trk, speed_kt=300, registration="G-ABCD" if not cs else ""))
+    return out
+
+
+LHR = {"iata": "LHR", "city": "London", "lat": 51.4706, "lon": -0.46194}
+LAX = {"iata": "LAX", "city": "Los Angeles", "lat": 33.9425, "lon": -118.408}
+STN = {"iata": "STN", "city": "London", "lat": 51.885, "lon": 0.235}
+DUB = {"iata": "DUB", "city": "Dublin", "lat": 53.4213, "lon": -6.27007}
+
+
+def sample_track():
+    """BA283 over Greenland, and a Ryanair hop to Dublin, with the paths flown so far."""
+    from flightframe.trackmap import great_circle
+    gc = great_circle((LHR["lat"], LHR["lon"]), (LAX["lat"], LAX["lon"]))
+    ba = _f(callsign="BAW283", altitude_ft=38000, speed_kt=482, track=262, distance_km=0,
+            lat=gc[27][0], lon=gc[27][1], registration="G-XWBC", type_code="A35K",
+            airline="British Airways", airline_iata="BA", flight_iata="BA283", origin=LHR, destination=LAX)
+    gc2 = great_circle((STN["lat"], STN["lon"]), (DUB["lat"], DUB["lon"]))
+    fr = _f(callsign="RYR81SV", altitude_ft=36000, speed_kt=435, track=291, distance_km=0,
+            lat=52.18, lon=-3.79, registration="EI-IFW", type_code="B38M",
+            airline="Ryanair", airline_iata="FR", flight_iata="FR207", origin=STN, destination=DUB)
+    return [("BA283", ba, gc[1:27:2]), ("FR207", fr, gc2[2:40:5])]
+
+
 def sample_wx():
     from datetime import datetime, timedelta
     from flightframe import weather
@@ -75,12 +112,28 @@ def _logo(f):
 
 def main(out):
     os.makedirs(out, exist_ok=True)
-    cfg = dict(config.DEFAULTS, label="Home, Bath", lat=51.38, lon=-2.36)
+    cfg = dict(config.DEFAULTS, label="Home, Bath", lat=51.38, lon=-2.36, night_mode="light")
     for orient in ("landscape", "portrait"):
         cfg["orientation"] = orient
         for name, f in SAMPLES.items():
             render.poster(f, cfg, nearby=4, logo=_logo(f), wx=sample_wx()).save(f"{out}/{orient}-{name}.png")
         render.quiet(cfg, "BA283 LHR–LAX at 21:14", wx=sample_wx()).save(f"{out}/{orient}-quiet.png")
+        a, b = SAMPLES["ba-widebody"], SAMPLES["easyjet-climbing"]
+        render.duo([a, b], cfg, 2, logos=(_logo(a), _logo(b)), wx=sample_wx()).save(f"{out}/{orient}-duo.png")
+        render.radar(sample_radar(), cfg, wx=sample_wx()).save(f"{out}/{orient}-radar.png")
+        night = dict(cfg, night_mode="dark")
+        wx = sample_wx()
+        wx["slots"][0]["kind"] = "clear"
+        render.poster(a, night, logo=_logo(a), wx=wx).save(f"{out}/{orient}-night.png")
+        wx["slots"][0]["kind"] = "rain"
+        render.duo([a, b], night, 2, logos=(_logo(a), _logo(b)), wx=wx).save(f"{out}/{orient}-night-duo-rain.png")
+        render.radar(sample_radar(), night, wx=wx).save(f"{out}/{orient}-night-radar.png")
+        from flightframe import trackmap
+        for q, f, trail in sample_track():
+            trackmap.tracker(cfg, q, f, trail=[(p[0], p[1]) for p in trail], wx=sample_wx()).save(
+                f"{out}/{orient}-track-{q}.png")
+        trackmap.tracker(night, "BA283", None, route={"origin": None}, state="unknown",
+                         wx=sample_wx()).save(f"{out}/{orient}-track-unknown.png")
         render.message(cfg, "Connect me to Wi-Fi",
                        ["Join the Wi-Fi network Flightframe-Setup (password skyabove).",
                         "Then open http://10.42.0.1 and choose your home Wi-Fi."],

@@ -11,7 +11,8 @@ from PIL import Image, ImageDraw, ImageFilter          # noqa: E402
 
 from flightframe import config, render                 # noqa: E402
 from flightframe.render import as_seen                  # noqa: E402
-from tools.preview import SAMPLES, _logo, sample_wx      # noqa: E402
+from tools.preview import SAMPLES, _logo, sample_radar, sample_track, sample_wx  # noqa: E402
+from flightframe import trackmap                        # noqa: E402
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "docs", "images")
 
@@ -38,7 +39,7 @@ def hero(screen):
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    cfg = dict(config.DEFAULTS, label="Home, Bath", lat=51.38, lon=-2.36)
+    cfg = dict(config.DEFAULTS, label="Home, Bath", lat=51.38, lon=-2.36, night_mode="light")
     wx = sample_wx()
     shots = {}
     for name in ["ba-widebody", "ryanair", "easyjet-climbing", "emirates-a380", "air-ambulance"]:
@@ -46,6 +47,18 @@ def main():
         shots[name] = render.poster(f, cfg, 4, logo=_logo(f), wx=wx)
         save(shots[name], f"screen-{name}")
     save(render.quiet(cfg, "BA283 LHR–LAX at 21:14", wx=wx), "screen-quiet")
+    a, b = SAMPLES["ba-widebody"], SAMPLES["easyjet-climbing"]
+    save(render.duo([a, b], cfg, 2, logos=(_logo(a), _logo(b)), wx=wx), "screen-duo")
+    save(render.radar(sample_radar(), cfg, wx=wx), "screen-radar")
+    q, f, trail = sample_track()[0]
+    save(trackmap.tracker(cfg, q, f, trail=trail, wx=wx), "screen-tracker")
+    night = dict(cfg, night_mode="dark")
+    nwx = sample_wx()
+    nwx["slots"][0]["kind"] = "clear"
+    save(render.poster(a, night, 4, logo=_logo(a), wx=nwx), "screen-night")
+    save(render.quiet(night, "BA283 LHR–LAX at 21:14", wx=nwx), "screen-night-quiet")
+    nwx["slots"][0]["kind"] = "rain"
+    save(render.duo([a, b], night, 2, logos=(_logo(a), _logo(b)), wx=nwx), "screen-night-rain")
     p = dict(cfg, orientation="portrait")
     f = SAMPLES["easyjet-climbing"]
     save(render.poster(f, p, 4, logo=_logo(f), wx=wx), "screen-portrait")

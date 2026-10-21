@@ -17,6 +17,12 @@ DEFAULTS = {
     "accent": "green",           # green | red | blue | yellow (green looks racing green on paper)
     "show_plane": True,          # aircraft drawing with the airline logo on the tail
     "show_weather": True,        # 12-hour forecast in the bottom line
+    "night_mode": "auto",        # auto (dark from sunset to sunrise) | light | dark
+    "duo": True,                 # show two aircraft when two are overhead
+    "facing": 0,                 # compass direction you face when looking at the frame
+    "radar_km": 40,              # radar screen range
+    "screen": "sky",             # sky | radar | track
+    "track": "",                 # flight number or registration to follow on the map
     "poll_seconds": 30,          # how often to ask the API
     "min_refresh_seconds": 180,  # Spectra 6 panels want >= 180 s between refreshes
     "stats_refresh_minutes": 10, # redraw the same flight this often to update height/speed
