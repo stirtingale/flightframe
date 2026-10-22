@@ -49,7 +49,7 @@ def is_night(sun, mode="auto", now=None):
 # ------------------------------------------------------------------ drawing
 def draw_moon(d, cx, cy, r, phase, south=False, lit=BLACK, dark=WHITE):
     """The moon as it looks tonight. Colours are pre-swap: lit part BLACK becomes white."""
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=dark, outline=lit, width=1)
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=dark, outline=lit, width=2)
     waxing = phase < 0.5
     k = math.cos(2 * math.pi * phase)
     for yy in range(-r, r + 1):
@@ -130,8 +130,9 @@ def decorate(img, box, kind, night, phase=None, lat=0.0, seed=None, big=15):
 
     # sun or moon: as high and as far right as there's room
     spot = None
-    for y in range(box[1] + big + 4, box[3] - big - 4, 4):
-        for x in range(box[2] - big - 4, box[0] + big + 4, -6):
+    # rightmost first, then highest: the seat is always the top-right of the sky
+    for x in range(box[2] - big - 4, box[0] + big + 4, -6):
+        for y in range(box[1] + big + 4, box[3] - big - 4, 4):
             if free.ok(x, y, big + 10):
                 spot = (x, y)
                 break
@@ -151,7 +152,7 @@ def decorate(img, box, kind, night, phase=None, lat=0.0, seed=None, big=15):
 
     # stars on a clear or partly cloudy night
     if night and not overcast:
-        want = 26 if kind == "clear" else 12
+        want = 14 if kind == "clear" else 7
         for _ in range(want * 30):
             if want <= 0:
                 break
@@ -160,8 +161,8 @@ def decorate(img, box, kind, night, phase=None, lat=0.0, seed=None, big=15):
             if not free.ok(x, y, 5):
                 continue
             if rng.random() < 0.18:      # a few brighter ones
-                d.line([x - 2, y, x + 2, y], fill=BLACK)
-                d.line([x, y - 2, x, y + 2], fill=BLACK)
+                d.rectangle([x - 3, y, x + 3, y + 1], fill=BLACK)
+                d.rectangle([x - 1, y - 2, x, y + 3], fill=BLACK)
             else:
                 d.rectangle([x, y, x + 1, y + 1], fill=BLACK)
             free.take(x, y, 6)
@@ -170,7 +171,7 @@ def decorate(img, box, kind, night, phase=None, lat=0.0, seed=None, big=15):
     # rain or snow falling through the empty sky
     if wet or snow:
         ink = BLACK if night else BLUE           # black turns white at night
-        want = 34 if kind in ("rain", "thunder") else 22
+        want = 22 if kind in ("rain", "thunder") else 14
         for _ in range(want * 30):
             if want <= 0:
                 break
@@ -182,7 +183,7 @@ def decorate(img, box, kind, night, phase=None, lat=0.0, seed=None, big=15):
                 for a in (0, 60, 120):
                     ra = math.radians(a)
                     d.line([x - math.cos(ra) * 3, y - math.sin(ra) * 3,
-                            x + math.cos(ra) * 3, y + math.sin(ra) * 3], fill=ink, width=1)
+                            x + math.cos(ra) * 3, y + math.sin(ra) * 3], fill=ink, width=2)
             else:
                 d.line([x + 2, y - 5, x - 2, y + 5], fill=ink, width=2)
             free.take(x, y, 4, 6)

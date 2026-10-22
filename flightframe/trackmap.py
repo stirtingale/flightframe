@@ -132,50 +132,67 @@ def draw_map(w, h, origin, dest, now, trail, accent, track=None, home=None):
     interest = route + list(trail) + ([now] if now else [])
     if not interest:
         interest = [o or t or home or (51.5, 0.0)]
-    view = View(interest, w, h)
+    view = View(interest, w, h, min_span=4.0 if (route or trail or now) else 16.0)
 
-    # land and borders
+    # coastline only: no borders, no specks (rings smaller than 6 px across)
     data = _load()
-    for key, width in (("borders", 1), ("coast", 2)):
-        for lo, hi, la_lo, la_hi, pts in data[key]:
-            if la_hi < -80 or la_lo > 82:
+    for lo, hi, la_lo, la_hi, pts in data["coast"]:
+        if la_hi < -80 or la_lo > 82:
+            continue
+        for shift in (-360, 0, 360):
+            if hi + shift < view.lon_lo or lo + shift > view.lon_hi:
                 continue
-            for shift in (-360, 0, 360):
-                if hi + shift < view.lon_lo or lo + shift > view.lon_hi:
-                    continue
-                xy = [view.xy(lat, lon + shift, raw=True) for lon, lat in pts]
-                ys = [p[1] for p in xy]
-                if max(ys) < 0 or min(ys) > h:
-                    continue
-                d.line(xy, fill=R.BLACK, width=width)
+            xy = [view.xy(lat, lon + shift, raw=True) for lon, lat in pts]
+            xs = [p[0] for p in xy]
+            ys = [p[1] for p in xy]
+            if max(ys) < 0 or min(ys) > h or max(xs) < 0 or min(xs) > w:
+                continue
+            if max(xs) - min(xs) < 6 and max(ys) - min(ys) < 6:
+                continue
+            d.line(xy, fill=R.BLACK, width=2)
 
-    # route still to fly, dashed; flown path solid in the accent
+    # route still to fly, dashed 3 px; flown path 6 px in the accent on a 12 px paper channel
     if route:
-        _dashed(d, [view.xy(*p) for p in route], R.BLACK, width=2)
+        _dashed(d, [view.xy(*p) for p in route], R.BLACK, width=3, on=8, off=7)
     flown = ([o] if o else []) + list(trail) + ([now] if now else [])
     if len(flown) >= 2:
-        d.line([view.xy(*p) for p in flown], fill=accent, width=4, joint="curve")
+        line = [view.xy(*p) for p in flown]
+        d.line(line, fill=R.WHITE, width=12, joint="curve")
+        d.line(line, fill=accent, width=6, joint="curve")
 
-    # airports
-    f_code = R.font("bold", 15)
+    # aircraft first, then airport labels (halo), then markers on top
+    if now:
+        x, y = view.xy(*now)
+        d.ellipse([x - 22, y - 22, x + 22, y + 22], fill=R.WHITE)
+        _plane_icon(d, x, y, track, 40)
+    elif home and not route:
+        x, y = view.xy(*home)
+        d.polygon([(x, y - 9), (x - 8, y - 1), (x + 8, y - 1)], fill=R.BLACK)
+        d.rectangle([x - 6, y - 1, x + 6, y + 7], fill=R.BLACK)
+    f_code = R.font("semi", 16)
+    marks = []
     for ap, filled in ((origin, True), (dest, False)):
         if ap.get("lat") is None:
             continue
         x, y = view.xy(ap["lat"], ap["lon"])
-        d.ellipse([x - 6, y - 6, x + 6, y + 6], fill=R.BLACK if filled else R.WHITE,
-                  outline=R.BLACK, width=3)
         other = dest if ap is origin else origin
         ox = view.xy(other["lat"], other["lon"])[0] if other.get("lat") is not None else x - 1
-        left = ox > x
         code = ap.get("iata") or ap.get("icao") or ""
-        tx = x - 11 if left else x + 11
-        tx = max(4 + (R.text_w(d, code, f_code) if left else 0), min(w - 4 - (0 if left else R.text_w(d, code, f_code)), tx))
-        d.text((tx, max(10, min(h - 10, y))), code, font=f_code, fill=R.BLACK,
-               anchor="rm" if left else "lm", stroke_width=3, stroke_fill=R.WHITE)
-
-    if now:
-        x, y = view.xy(*now)
-        _plane_icon(d, x, y, track, 30)
+        tw = R.text_w(d, code, f_code)
+        left = ox > x                      # label on the side away from the route
+        if left and x - 12 - tw < 4:       # no room: flip, never sit on the marker
+            left = False
+        elif not left and x + 12 + tw > w - 4:
+            left = True
+        tx = x - 12 if left else x + 12
+        ty = max(12, min(h - 12, y))
+        d.text((tx, ty), code, font=f_code, fill=R.BLACK, anchor="rm" if left else "lm",
+               stroke_width=4, stroke_fill=R.WHITE)
+        marks.append((x, y, filled))
+    for x, y, filled in marks:
+        d.ellipse([x - 9, y - 9, x + 9, y + 9], fill=R.WHITE)
+        d.ellipse([x - 6, y - 6, x + 6, y + 6], fill=R.BLACK if filled else R.WHITE,
+                  outline=R.BLACK, width=3)
     return img
 
 
@@ -190,52 +207,59 @@ def tracker(cfg, query, f=None, route=None, trail=(), state="live", seen_at=None
     from .flights import _airport
     c = R.Canvas(cfg.get("orientation", "landscape"))
     night = R.is_night(cfg, wx)
-    accent = R._accent(cfg, night)
-    units = cfg.get("units", "metric")
+    c.setup(cfg, night)
+    accent, units = c.accent, c.units
     route = route or {}
     origin = (f.origin if f and f.origin else None) or _airport(route.get("origin"))
     dest = (f.destination if f and f.destination else None) or _airport(route.get("destination"))
-    right = f"Updated {R._now()}"
-    head = R._header(c, "TRACKING", right, accent)
-    foot_top = c.h - c.m + 10 - R.FOOTER_WX
-    inner = c.w - 2 * c.m
+    R._header(c, "TRACKING", f"Updated {R._now()}")
+    top = R.CONTENT_TOP
     if c.portrait:
-        mx, my, mw, mh = c.m, head + 16, inner, 330
-        px, py, pw = c.m, my + mh + 22, inner
+        mx, my, mw, mh = c.m, top, c.inner, 288
+        px, pw = c.m, c.inner
+        b0 = my + mh + 24 + R.cap(R.TITLE)
     else:
-        mw = 432
-        mx, my, mh = c.m, head + 14, foot_top - head - 32
-        px, py, pw = c.m + mw + 28, head + 18, inner - mw - 28
+        mx, my, mw, mh = c.m, top, c.half, c.bottom - top
+        px, pw = c.mid, c.w - c.m - c.mid
+        b0 = R.L_NUM
 
     now = (f.lat, f.lon) if f else None
     trail = list(trail)
     if not now and state in ("lost", "landed") and trail:
         now = trail[-1]
-    m = draw_map(mw, mh, origin or {}, dest or {}, now, trail[:-1] if now and trail and now == trail[-1] else trail,
+    m = draw_map(mw - 4, mh - 4, origin or {}, dest or {}, now,
+                 trail[:-1] if now and trail and now == trail[-1] else trail,
                  accent, track=f.track if f else None,
                  home=(float(cfg["lat"]), float(cfg["lon"])) if cfg.get("lat") is not None else None)
-    c.img.paste(m, (mx, my))
+    c.img.paste(m, (mx + 2, my + 2))
+    c.d.rectangle([mx, my, mx + mw - 1, my + mh - 1], outline=R.BLACK, width=2)   # the map's window
 
-    # --- panel
-    number = (f.flight_number if f else "") or query.upper()
-    ff = R.fit(c.d, number, "bold", 34, pw, 20)
-    c.text((px, py), number, ff, fill=accent, anchor="lt")
-    y = py + ff.getbbox("L")[3] + 12
-    who = " · ".join(b for b in ((f.airline or f.operator) if f else (route.get("airline") or {}).get("name", ""),
-                                 (f.type_code if f else "")) if b)
-    if who:
-        fw = R.font("semi", 16)
-        c.text((px, y), R.ellipsize(c.d, who, fw, pw), fw, anchor="lt")
-        y += 30
+    # --- panel: same order and sizes as the poster
+    number = (R.ident(f) if f else "") or query.upper()
+    ff, _ = R.fit_scale(c, number, R.TITLE, pw, 26)
+    c.text((px - 1, b0), number, ff, fill=accent, anchor="ls")
+    y = b0 + 36
+    if f:
+        y = R._identity(c, px, y, f, pw, R.SUB, max_lines=1)
+    else:
+        name = (route.get("airline") or {}).get("name", "")
+        if name:
+            fw, _ = R.fit_scale(c, name, R.SUB, pw)
+            c.text((px, y), name, fw, anchor="ls")
+        else:
+            y -= 36
     if origin and dest:
-        codes = f"{origin.get('iata')} → {dest.get('iata')}"
-        fc = R.fit(c.d, codes, "bold", 42, pw, 24)
-        c.text((px - 2, y + 4), codes, fc, anchor="lt")
-        y += fc.getbbox("L")[3] + 16
+        y += 18 + R.cap(R.DISPLAY)
+        R.route_line(c, px - 2, y, origin.get("iata"), dest.get("iata"), R.DISPLAY, pw)
+        y += 28
         cities = f"{origin.get('city')} to {dest.get('city')}"
-        fs = R.font("regular", 15)
-        c.text((px, y), R.ellipsize(c.d, cities, fs, pw), fs, anchor="lt")
-        y += 30
+        fs = R.F(R.BODY)
+        if R.text_w(c.d, cities, fs) > pw:
+            cities = f"{origin.get('city')} to"
+            c.text((px, y), cities, fs, anchor="ls")
+            y += 22
+            cities = dest.get("city") or ""
+        c.text((px, y), cities, fs, anchor="ls")
     # progress
     total = flown = left = None
     if origin and dest and origin.get("lat") is not None and dest.get("lat") is not None:
@@ -249,27 +273,23 @@ def tracker(cfg, query, f=None, route=None, trail=(), state="live", seen_at=None
             flown, left = 0.0, total
     if total and flown is not None:
         frac = max(0.0, min(1.0, flown / total)) if total else 0
-        by = y + 8
-        c.d.rectangle([px, by - 1, px + pw, by + 1], fill=R.BLACK)
-        c.d.rectangle([px, by - 3, px + pw * frac, by + 3], fill=accent)
-        c.d.ellipse([px + pw * frac - 6, by - 6, px + pw * frac + 6, by + 6], fill=accent, outline=R.BLACK, width=2)
-        fs = R.font("regular", 13)
-        c.text((px, by + 14), f"{R.fmt_dist(flown, units)} flown", fs)
-        c.text((px + pw, by + 14), f"{R.fmt_dist(left, units)} to go", fs, anchor="ra")
-        y = by + 44
+        bt = y + 16
+        c.d.rectangle([px, bt, px + pw - 1, bt + 9], outline=R.BLACK, width=2)
+        if frac > 0:
+            c.d.rectangle([px, bt, px + max(4, (pw - 1) * frac), bt + 9], fill=accent)
+        c.text((px, bt + 34), f"{R.fmt_dist(flown, units)} flown", R.F(R.BODY), anchor="ls")
+        c.text((px + pw, bt + 34), f"{R.fmt_dist(left, units)} to go", R.F(R.BODY), anchor="rs")
+        y = bt + 34
 
     # figures, or what's going on
     if state == "live" and f:
         mins = (left / (f.speed_kt * 1.852) * 60) if left is not None and f.speed_kt else None
-        cells = [("Altitude", R.fmt_alt(f.altitude_ft, units)), ("Speed", R.fmt_speed(f.speed_kt, units)),
+        col = (pw - R.GUTTER) // 2
+        cells = [("Altitude", R.fmt_alt(f.altitude_ft, units), R.phase(f)),
+                 ("Speed", R.fmt_speed(f.speed_kt, units)),
                  ("Time left", _fmt_left(mins) if mins is not None else "–"),
-                 ("Aircraft", f.registration or f.type_code or "–")]
-        col = pw / 2
-        for i, (label, value) in enumerate(cells):
-            r_, k = divmod(i, 2)
-            x, yy = px + k * col, y + r_ * 52
-            c.text((x, yy), label.upper(), R.font("bold", 12))
-            c.text((x, yy + 18), value, R.fit(c.d, value, "semi", 22, col - 10, 14))
+                 ("Aircraft", R.aircraft_value(c, f, col))]
+        R._stats(c, y + 36, cells, [px, px + col + R.GUTTER], col)
     else:
         title, lines = {
             "waiting": ("Not flying yet", ["It hasn't taken off, or isn't sending its position.",
@@ -281,14 +301,16 @@ def tracker(cfg, query, f=None, route=None, trail=(), state="live", seen_at=None
             "unknown": ("Can't find it", ["Check the flight number on the settings page.",
                                           "It will appear once it's in the air."]),
         }.get(state, ("", []))
-        ft = R.fit(c.d, title, "bold", 30, pw, 18)
-        c.text((px, y), title, ft, anchor="lt")
-        y += ft.getbbox("L")[3] + 12
-        fs = R.font("regular", 15)
+        y += 18 + R.cap(R.DISPLAY) if not (origin and dest) else 48
+        ft, _ = R.fit_scale(c, title, R.DISPLAY, pw, 26)
+        c.text((px - 2, y), title, ft, anchor="ls")
+        y += 32
+        fs = R.F(R.BODY)
         for line in lines:
             for chunk in R._wrap(c.d, line, fs, pw):
-                c.text((px, y), chunk, fs, anchor="lt")
-                y += 21
+                if chunk:
+                    c.text((px, y), chunk, fs, anchor="ls")
+                    y += 22
     R._footer_wx(c, wx)
     return R.finish(c, cfg, wx, night, decorate=False)
 

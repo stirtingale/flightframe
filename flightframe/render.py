@@ -5,6 +5,7 @@ off, so nothing needs dithering and text stays crisp on paper.
 """
 import glob
 import math
+import re
 import os
 from datetime import datetime
 
@@ -28,6 +29,7 @@ _FONT_CANDIDATES = {
     "bold": ["Inter-Bold.*", "InterDisplay-Bold.*", "DejaVuSans-Bold.ttf"],
     "semi": ["Inter-SemiBold.*", "InterDisplay-SemiBold.*", "DejaVuSans-Bold.ttf"],
     "regular": ["Inter-Medium.*", "Inter-Regular.*", "DejaVuSans.ttf"],
+    "display": ["InterDisplay-Bold.*", "Inter-Bold.*", "DejaVuSans-Bold.ttf"],
 }
 _font_paths = {}
 _font_cache = {}
@@ -73,6 +75,56 @@ def ellipsize(d, s, f, max_w):
         s = s[:-1]
     return s.rstrip() + "…"
 
+# ================================================================ the system
+# One grid, one type scale, one set of components for every screen.
+#
+# Landscape 800 x 480: side margins 40, top and bottom 32. Four columns of 165
+# with 20 gutters (column starts 40, 225, 410, 595); halves 40-370 and 410-760.
+# Portrait 480 x 800: side margins 32, top and bottom 32, two columns of 198.
+#
+# Fixed baselines: header 44, rule 54-55, content from 72, footer h - 32.
+SIDE_L, SIDE_P, TOPM = 40, 32, 32
+GUTTER = 20
+HEAD_BASE = TOPM + 12          # 44
+RULE_Y = HEAD_BASE + 10        # 54, 2 px
+CONTENT_TOP = RULE_Y + 18      # 72
+
+# The type scale: seven sizes, nothing else. Long text steps down the scale.
+SCALE = (116, 88, 56, 36, 26, 16, 13)
+# Styles: (font kind, px, tracking px)
+LABEL = ("bold", 13, 1)        # small capitals: labels, the screen name, radar labels
+BODY = ("regular", 16, 0)      # secondary lines, footer (Medium, never below 16)
+BODY_S = ("semi", 16, 0)       # emphasised body: footer temperatures, table names
+UNIT = ("semi", 16, 0)         # units after a figure: 0.6 of the value size
+VALUE = ("semi", 26, 0)        # figures
+SUB = ("regular", 26, 0)       # identity line and cities: value size, lighter weight
+TITLE = ("display", 36, 0)     # flight numbers (accent)
+DISPLAY = ("display", 56, 0)   # duo and tracker routes, aircraft names, setup titles
+HERO_S = ("display", 88, 0)    # "Quiet skies"; the first step down for long codes
+HERO = ("display", 116, 0)     # airport codes
+
+ARROW_HERO = 8                 # the poster's arrow stroke
+ARROW_ROUTE = 6                # the route arrow at Display size
+
+
+def F(style, size=None):
+    return font(style[0], size or style[1])
+
+
+def step(style, size):
+    """The same style at another size on the scale."""
+    return (style[0], size, style[2] if len(style) > 2 else 0)
+
+
+def fit_scale(c, s, style, max_w, floor=16):
+    """Largest size on the scale (<= style's) at which s fits in max_w."""
+    sizes = [z for z in SCALE if z <= style[1] and z >= floor]
+    for z in sizes:
+        if text_w(c.d, s, font(style[0], z)) <= max_w:
+            return font(style[0], z), z
+    z = sizes[-1] if sizes else style[1]
+    return font(style[0], z), z
+
 
 class Canvas:
     def __init__(self, orientation="landscape"):
@@ -81,9 +133,25 @@ class Canvas:
         self.img = Image.new("RGB", (self.w, self.h), WHITE)
         self.d = ImageDraw.Draw(self.img)
         self.d.fontmode = "1"   # no anti-aliasing: crisp on E Ink
-        self.m = 32 if self.portrait else 40
+        self.m = SIDE_P if self.portrait else SIDE_L
+        self.inner = self.w - 2 * self.m
+        cols = 2 if self.portrait else 4
+        self.col_w = (self.inner - (cols - 1) * GUTTER) // cols
+        self.cols = [self.m + i * (self.col_w + GUTTER) for i in range(cols)]
+        self.half = (self.inner - GUTTER) // 2
+        self.mid = self.m + self.half + GUTTER          # start of the right half
+        self.foot = self.h - TOPM                       # footer baseline
+        self.bottom = self.foot - 36                    # lowest content baseline
         self.keep = []          # aircraft drawings: put back the right way round at night
         self.sky = None         # empty area where sun, moon, stars and rain may go
+        self.accent = GREEN
+        self.facing = 0
+        self.units = "metric"
+
+    def setup(self, cfg, night):
+        self.accent = _accent(cfg, night)
+        self.facing = float(cfg.get("facing", 0) or 0)
+        self.units = cfg.get("units", "metric")
 
     def paste_plane(self, img, xy):
         xy = (int(xy[0]), int(xy[1]))
@@ -95,6 +163,45 @@ class Canvas:
 
     def rule(self, y, thick=2, fill=BLACK):
         self.d.rectangle([self.m, y, self.w - self.m, y + thick - 1], fill=fill)
+
+
+def tracked(c, xy, s, style, fill=BLACK, anchor="ls"):
+    """Text with letter spacing (PIL has none): drawn a character at a time."""
+    f = F(style)
+    t = style[2]
+    w = sum(c.d.textlength(ch, font=f) for ch in s) + t * max(0, len(s) - 1)
+    x, y = xy
+    if anchor[0] == "r":
+        x -= w
+    elif anchor[0] == "m":
+        x -= w / 2
+    for ch in s:
+        c.d.text((x, y), ch, font=f, fill=fill, anchor="l" + anchor[1])
+        x += c.d.textlength(ch, font=f) + t
+    return w
+
+
+def cap(style, size=None):
+    """Cap height of a style in px."""
+    return -F(style, size).getbbox("H", anchor="ls")[1]
+
+
+def ident(f):
+    """One name per flight on every screen."""
+    return _ident(f)
+
+
+def _ident(f):
+    return f.flight_number or f.callsign or f.registration or (f.hex or "").upper()
+
+
+def short_type(f):
+    """'Airbus A350-1041' -> 'A350-1041'; the ICAO code when there's no name."""
+    name = (f.type_name or "").strip()
+    for maker in ("Airbus Helicopters ", "Airbus ", "Boeing ", "Embraer ", "Bombardier ", "Eurocopter "):
+        if name.startswith(maker):
+            name = name[len(maker):]
+    return name or f.type_code or "–"
 
 
 # ---------------------------------------------------------------- formatting
@@ -158,57 +265,6 @@ def _weather_now(wx):
     slots = (wx or {}).get("slots") or []
     return slots[0]["kind"] if slots else None
 
-
-def finish(c, cfg, wx, night, decorate=True):
-    """Add the sky (sun or moon, stars, rain) and turn the screen dark at night."""
-    if decorate and c.sky:
-        try:
-            sky.decorate(c.img, c.sky, _weather_now(wx), night,
-                         lat=float(cfg.get("lat") or 0), big=13 if c.portrait else 15)
-        except Exception:
-            pass
-    return sky.night(c.img, c.keep) if night else c.img
-
-
-def compass_glyph(d, cx, cy, r, bearing, facing=0, accent=RED):
-    """A small dial with a needle towards the aircraft, turned to suit the frame's facing."""
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=BLACK, width=2)
-    a = math.radians((bearing - (facing or 0)) % 360)
-    tip = (cx + math.sin(a) * (r - 2), cy - math.cos(a) * (r - 2))
-    side = math.radians(90)
-    w = max(2.5, r * 0.32)
-    back = (cx - math.sin(a) * r * 0.35, cy + math.cos(a) * r * 0.35)
-    left = (cx + math.sin(a - side) * w, cy - math.cos(a - side) * w)
-    right = (cx + math.sin(a + side) * w, cy - math.cos(a + side) * w)
-    d.polygon([tip, left, back, right], fill=accent)
-    # north mark on the rim
-    n = math.radians((0 - (facing or 0)) % 360)
-    nx, ny = cx + math.sin(n) * r, cy - math.cos(n) * r
-    d.ellipse([nx - 2, ny - 2, nx + 2, ny + 2], fill=BLACK)
-
-
-# ---------------------------------------------------------------- pieces
-def _header(c, left, right, accent, dial=None, rule=True):
-    """dial: (bearing, facing) to draw a compass beside the right-hand text."""
-    y = c.m - 6
-    c.text((c.m, y), left, font("bold", 14), fill=accent)
-    if right:
-        fr = font("semi", 14)
-        c.text((c.w - c.m, y), right, fr, anchor="ra")
-        if dial is not None:
-            x = c.w - c.m - text_w(c.d, right, fr) - 15
-            compass_glyph(c.d, x, y + 8, 9, dial[0], dial[1], accent)
-    if rule:
-        c.rule(y + 26)
-    return y + 26
-
-
-def _footer(c, cfg, extra=""):
-    y = c.h - c.m + 4
-    label = cfg.get("label") or ""
-    c.text((c.m, y), label, font("regular", 15), anchor="ls")
-    right = f"{extra}  ·  {_now()}" if extra else f"Updated {_now()}"
-    c.text((c.w - c.m, y), right, font("regular", 15), anchor="rs")
 
 
 # ---------------------------------------------------------------- weather
@@ -294,210 +350,382 @@ def _sun_glyph(d, cx, cy, up):
         d.line([ax, cy - 7, ax, hy - 4], fill=BLACK, width=2)
 
 
+
+
+# ---------------------------------------------------------------- finishing
+def finish(c, cfg, wx, night, decorate=True):
+    """Add the sky (sun or moon, stars, rain) and turn the screen dark at night."""
+    if decorate and c.sky:
+        try:
+            sky.decorate(c.img, c.sky, _weather_now(wx), night,
+                         lat=float(cfg.get("lat") or 0), big=13 if c.portrait else 15)
+        except Exception:
+            pass
+    if not night:
+        return c.img
+    # Blue ink vanishes on black paper: anything blue (rain, snow) turns white at night
+    c.img.paste(BLACK, mask=sky._where(c.img, BLUE))
+    return sky.night(c.img, c.keep)
+
+
+# ---------------------------------------------------------------- components
+def compass_glyph(d, cx, cy, r, bearing, facing=0, accent=RED):
+    """The direction mark: one solid chevron pointing at the aircraft,
+    turned to suit the way the frame faces. No ring, no hairlines."""
+    a = math.radians((bearing - (facing or 0)) % 360)
+    ca, sa = math.cos(a), math.sin(a)
+    shape = [(0, -r), (0.8 * r, 0.9 * r), (0, 0.4 * r), (-0.8 * r, 0.9 * r)]
+    d.polygon([(cx + x * ca - y * sa, cy + x * sa + y * ca) for x, y in shape], fill=accent)
+
+
+UNITS = ("m", "ft", "km", "mi", "km/h", "mph", "h", "min")
+
+
+def _is_big(tok):
+    return tok not in UNITS
+
+
+def figure(c, x, base, value, style=VALUE, anchor="l", draw=True):
+    """A figure: numbers (and compass points) at the value size, units at 0.6 of it,
+    all on one baseline. Returns the width."""
+    big = F(style)
+    small = F(UNIT) if style[1] >= 26 else F(step(LABEL, 13))
+    toks = value.split(" ")
+    parts, w, prev = [], 0, None
+    for t in toks:
+        b = _is_big(t)
+        f = big if b else small
+        if prev is not None:
+            w += max(3 if not b else 5, int(style[1] * (0.26 if b and prev else 0.12 if not b else 0.22)))
+        parts.append((w, t, f))
+        w += text_w(c.d, t, f)
+        prev = b
+    if draw:
+        x0 = x - w if anchor == "r" else x
+        for dx, t, f in parts:
+            c.text((x0 + dx, base), t, f, anchor="ls")
+    return w
+
+
+def where(f, units):
+    return f"{fmt_dist(f.distance_km, units)} {compass(f.bearing)}".strip()
+
+
+def where_figure(c, x, base, f, style=VALUE, anchor="l", draw=True):
+    """Chevron + '3.2 km NE'. The chevron is as tall as the figure's capitals."""
+    s = where(f, c.units)
+    r = max(6, round(cap(style) * 0.55))
+    tw = figure(c, 0, 0, s, style, draw=False)
+    total = 2 * r + 8 + tw
+    if draw:
+        x0 = x - total if anchor == "r" else x
+        compass_glyph(c.d, x0 + r, base - cap(style) / 2, r, f.bearing, c.facing, c.accent)
+        figure(c, x0 + 2 * r + 8, base, s, style)
+    return total
+
+
+def trend_mark(c, x, base, trend, style=VALUE):
+    """Climbing or descending: a solid accent triangle, capital height tall."""
+    h = cap(style)
+    top, bot = base - h, base
+    w = round(h * 0.8)
+    if trend == "climbing":
+        pts = [(x, bot), (x + w, bot), (x + w / 2, top)]
+    else:
+        pts = [(x, top), (x + w, top), (x + w / 2, bot)]
+    c.d.polygon(pts, fill=c.accent)
+    return w
+
+
+def _header(c, left, right, accent=None, rule=True):
+    """The screen name (small capitals, accent) at left, one status at right."""
+    tracked(c, (c.m, HEAD_BASE), left, LABEL, fill=accent or c.accent)
+    if right:
+        c.text((c.w - c.m, HEAD_BASE), right, F(BODY), anchor="rs")
+    if rule:
+        c.rule(RULE_Y)
+    return CONTENT_TOP
+
+
+def _footer(c, cfg, extra=""):
+    label = cfg.get("label") or ""
+    c.text((c.m, c.foot), label, F(BODY), anchor="ls")
+    right = f"{extra}  ·  {_now()}" if extra else f"Updated {_now()}"
+    c.text((c.w - c.m, c.foot), right, F(BODY), anchor="rs")
+
+
 def _footer_wx(c, wx):
-    """Bottom line on one row: sunrise and sunset, then the next 12 hours."""
-    bottom = c.h - c.m + 10
-    top = bottom - FOOTER_WX
-    mid = top + FOOTER_WX // 2 + 1
-    f_time = font("semi", 15)
-    f_hour = font("regular", 15)          # same size as the sunrise/sunset times
-    f_temp = font("semi", 15)
+    """Bottom line: sunrise and sunset at left, then forecast cells on an even pitch.
+    Every word in it is 16 px; temperatures in SemiBold."""
+    mid = c.foot - cap(BODY) / 2
+    f_time = F(BODY)
+    f_temp = F(BODY_S)
     x = c.m
     sun = (wx or {}).get("sun") or (None, None)
     if sun[0]:
         for t, up in ((sun[0], True), (sun[1], False)):
             _sun_glyph(c.d, x + 11, mid, up)
-            c.text((x + 38, mid), t.strftime("%H:%M"), f_time, anchor="lm")
-            x += 38 + int(text_w(c.d, "00:00", f_time)) + 18
+            c.text((x + 38, c.foot), t.strftime("%H:%M"), f_time, anchor="ls")
+            x += 38 + int(text_w(c.d, "00:00", f_time)) + 16
+        x += 16
     slots = (wx or {}).get("slots") or []
     if not slots:
-        c.text((c.w - c.m, mid), f"Updated {_now()}", font("regular", 13), anchor="rm")
+        c.text((c.w - c.m, c.foot), f"Updated {_now()}", f_time, anchor="rs")
         return
-    hour_w = int(text_w(c.d, "00:00", f_hour))
+    hour_w = int(text_w(c.d, "00:00", f_time))
     temp_w = int(text_w(c.d, "00°", f_temp))
     icon = 24
-    pad_l, pad_r = 12, 9                # space either side of each icon
-    cell = hour_w + pad_l + icon + pad_r + temp_w
-    gap = 16
-    room = c.w - c.m - x - 6
-    fits = max(0, (room + gap) // (cell + gap))
+    cell = hour_w + 8 + icon + 8 + temp_w
+    room = c.w - c.m - x
+    fits = max(1, (room + 8) // (cell + 8))
     if fits < len(slots):
         slots = slots[1:]               # short of space: the next hours matter more than now
     n = min(len(slots), fits)
-    x0 = c.w - c.m - n * cell - max(0, n - 1) * gap
+    pitch = (room - cell) / (n - 1) if n > 1 else 0
+    pitch = min(pitch, cell + 40)
+    x0 = c.w - c.m - cell - (n - 1) * pitch
+    first = ((wx or {}).get("slots") or [None])[0]
     for i, sl in enumerate(slots[:n]):
-        cx = x0 + i * (cell + gap)
-        label = "Now" if sl is (wx or {}).get("slots", [None])[0] else sl["time"].strftime("%H:%M")
-        c.text((cx + hour_w, mid), label, f_hour, anchor="rm")
-        weather_icon(c.d, sl["kind"], sl["day"], cx + hour_w + pad_l + icon // 2, mid, icon)
-        c.text((cx + hour_w + pad_l + icon + pad_r, mid), f"{round(sl['temp'])}°", f_temp, anchor="lm")
+        cx = x0 + i * pitch
+        label = "Now" if sl is first else sl["time"].strftime("%H:%M")
+        c.text((cx + hour_w, c.foot), label, f_time, anchor="rs")
+        weather_icon(c.d, sl["kind"], sl["day"], cx + hour_w + 8 + icon // 2, mid - 1, icon)
+        c.text((cx + hour_w + 8 + icon + 8, c.foot), f"{round(sl['temp'])}°", f_temp, anchor="ls")
 
 
-def _arrow(c, x0, x1, y, fill, head=14, thick=4):
-    c.d.rectangle([x0, y - thick // 2, x1 - head + 2, y + thick // 2], fill=fill)
-    c.d.polygon([(x1, y), (x1 - head, y - head * 0.7), (x1 - head, y + head * 0.7)], fill=fill)
+def _arrow(c, x0, x1, y, fill, thick=ARROW_ROUTE):
+    """The one arrow: a solid shaft and a head 3 x the stroke long."""
+    head = thick * 3
+    hw = thick * 1.6
+    c.d.rectangle([x0, y - thick // 2, x1 - head + 1, y - thick // 2 + thick - 1], fill=fill)
+    c.d.polygon([(x1, y), (x1 - head, y - hw), (x1 - head, y + hw)], fill=fill)
 
 
-ROW_H = 56
+def route_line(c, x, base, o, d, style, max_w, anchor="l"):
+    """'LHR -> LAX' with the drawn arrow, stepping down the scale until it fits."""
+    for size in [z for z in SCALE if z <= style[1]] + [style[1]]:
+        f = F(style, size)
+        gap = int(size * 0.22)
+        aw = int(size * 0.7)
+        w = text_w(c.d, o, f) + gap + aw + gap + text_w(c.d, d, f)
+        if w <= max_w or size <= 26:
+            break
+    x0 = x if anchor == "l" else x - w
+    c.text((x0, base), o, f, anchor="ls")
+    ax = x0 + text_w(c.d, o, f) + gap
+    _arrow(c, ax, ax + aw, int(base - cap(style, size) / 2), c.accent,
+           thick=ARROW_ROUTE if size >= 56 else 4)
+    c.text((ax + aw + gap, base), d, f, anchor="ls")
+    return size
 
 
-def _stats(c, y, cells, cols):
-    """cells: list of (label, value). Laid out in a grid of `cols` columns."""
-    usable = c.w - 2 * c.m
-    col_w = usable / cols
-    row_h = ROW_H
-    for i, (label, value) in enumerate(cells):
-        r, k = divmod(i, cols)
-        x = c.m + k * col_w
-        yy = y + r * row_h
-        c.text((x, yy), label.upper(), font("bold", 12))
-        fv = fit(c.d, value, "semi", 24, col_w - 14, 14)
-        c.text((x, yy + 18), value, fv)
-    rows = (len(cells) + cols - 1) // cols
-    return y + rows * row_h
+ROW_H = 66          # label baseline to the next row's label baseline
+VAL_DY = 32         # label baseline to value baseline
+
+
+def _stats(c, base, cells, xs, col_w):
+    """The figures row. cells: (label, value) or (label, value, extra) where extra is
+    'climbing' / 'descending' or a Flight (draws the chevron and distance)."""
+    per = len(xs)
+    for i, cell in enumerate(cells):
+        label, value = cell[0], cell[1]
+        extra = cell[2] if len(cell) > 2 else None
+        r, k = divmod(i, per)
+        x = xs[k]
+        yy = base + r * ROW_H
+        tracked(c, (x, yy), label.upper(), LABEL)
+        vb = yy + VAL_DY
+        if extra is not None and not isinstance(extra, str):
+            st = VALUE if where_figure(c, 0, 0, extra, VALUE, draw=False) <= col_w else BODY_S
+            where_figure(c, x, vb, extra, st)
+            continue
+        room = col_w - (28 if extra in ("climbing", "descending") else 0)
+        st = VALUE if figure(c, 0, 0, value, VALUE, draw=False) <= room else BODY_S
+        w = figure(c, x, vb, value, st)
+        if extra in ("climbing", "descending"):
+            trend_mark(c, x + w + 8, vb, extra, st)
+
+
+def _identity(c, x, base, f, max_w, style=SUB, max_lines=2):
+    """'British Airways · G-XWBC'. The registration never splits from its dot.
+    Returns the baseline of the last line."""
+    who = f.airline or f.operator or ""
+    reg = f.registration or ""
+    words = who.split()
+    if words and reg:       # the last word of the name travels with the registration
+        words[-1] = f"{words[-1]}\u00a0·\u00a0{reg}"
+    elif reg:
+        words = [reg]
+    for st in (style, step(style, 16)):
+        fnt = F(st)
+        lines, line = [], ""
+        for wd in words:
+            t = f"{line} {wd}".strip()
+            if text_w(c.d, t, fnt) <= max_w or not line:
+                line = t
+            else:
+                lines.append(line)
+                line = wd
+        if line:
+            lines.append(line)
+        if len(lines) <= max_lines:
+            break
+    lead = 30 if st[1] >= 26 else 22
+    for i, ln in enumerate(lines):
+        c.text((x, base + i * lead), ln, fnt, anchor="ls")
+    return base + (len(lines) - 1) * lead
+
+
+def aircraft_value(c, f, col_w):
+    """The AIRCRAFT figure: the short type name if it fits, otherwise the code."""
+    name = short_type(f)
+    if text_w(c.d, name, F(VALUE)) <= col_w:
+        return name
+    return f.type_code or name
 
 
 # ---------------------------------------------------------------- screens
+# Shared baselines for the single-aircraft family (poster, no-route poster, quiet).
+# The figures row never moves.
+L_NUM, L_ID, L_HERO, L_CITY, L_STATS = 98, 134, 284, 320, 356
+P_NUM, P_ID, P_PLANE, P_CODE1, P_STATS = 98, 134, 176, 376, 630
+
+
+def _poster_cells(c, f, col_w):
+    return [("Distance", "", f),
+            ("Altitude", fmt_alt(f.altitude_ft, c.units), phase(f)),
+            ("Speed", fmt_speed(f.speed_kt, c.units)),
+            ("Aircraft", aircraft_value(c, f, col_w))]
+
+
 def poster(f, cfg, nearby=0, logo=None, wx=None):
     c = Canvas(cfg.get("orientation", "landscape"))
     night = is_night(cfg, wx)
-    units = cfg.get("units", "metric")
-    accent = _accent(cfg, night)
+    c.setup(cfg, night)
+    accent = c.accent
     show_plane = cfg.get("show_plane", True)
-    where = f"{fmt_dist(f.distance_km, units)} {compass(f.bearing)}".strip()
-    head = _header(c, "OVERHEAD NOW", where, accent, dial=(f.bearing, cfg.get("facing", 0)))
-    top = head + 18
-    inner = c.w - 2 * c.m
-    fn = f.flight_number
-    airline = f.airline or f.operator or ""
+    _header(c, "OVERHEAD NOW", "")
+    fn = ident(f)
     kind = plane.classify(f.type_code, f.category)
 
-    # --- identity block: flight number + airline, aircraft drawing beside or below
-    if c.portrait:
-        ff = fit(c.d, fn, "bold", 38, inner, 22)
-        c.text((c.m, top), fn, ff, fill=accent, anchor="lt")
-        y = top + ff.size + 10
-        if airline:
-            fa = fit(c.d, airline, "semi", 21, inner, 14)
-            c.text((c.m, y), ellipsize(c.d, airline, fa, inner), fa, anchor="lt")
-            y += 32
+    if not c.portrait:
+        text_max = c.half if show_plane else c.inner
+        ff, _ = fit_scale(c, fn, TITLE, text_max, 26)
+        c.text((c.m - 1, L_NUM), fn, ff, fill=accent, anchor="ls")
+        _identity(c, c.m, L_ID, f, text_max)
         if show_plane:
-            img = plane.draw(kind, inner, 116, logo=logo, accent=accent)
-            c.paste_plane(img, (c.m + (inner - img.width) // 2, y + 8))
-            y += img.height + 30
+            ph = 96
+            img = plane.draw(kind, int(c.half), ph, logo=logo, accent=accent)
+            right = c.w - c.m + 4
+            corner = img.crop((img.width - 52, 0, img.width, 40)).convert("L").getextrema()[0]
+            if corner < 250:        # keep the sky seat (top-right 52 x 52) for the sun or moon
+                img = plane.draw(kind, int(c.half) - 52, ph, logo=logo, accent=accent)
+                right -= 52
+            c.paste_plane(img, (right - img.width, CONTENT_TOP + 14 + (ph - img.height) // 2))
+            c.sky = (c.mid, CONTENT_TOP - 12, c.w - c.m + 8, L_HERO - cap(HERO) - 10)
+        if f.has_route:
+            o, d = f.origin, f.destination
+            code_w = (c.inner - 120) // 2
+            size = min(fit_scale(c, ap["iata"], HERO, code_w, 56)[1] for ap in (o, d))
+            big = F(HERO, size)
+            c.text((c.m - 4, L_HERO), o["iata"], big, anchor="ls")
+            c.text((c.w - c.m + 3, L_HERO), d["iata"], big, anchor="rs")
+            _arrow(c, c.w // 2 - 40, c.w // 2 + 40, int(L_HERO - cap(HERO, size) / 2), accent,
+                   thick=ARROW_HERO)
+            zc = min(fit_scale(c, ap["city"], SUB, code_w + 40)[1] for ap in (o, d))
+            for ap, anchor, x in ((o, "ls", c.m), (d, "rs", c.w - c.m)):
+                c.text((x, L_CITY), ap["city"], F(SUB, zc), anchor=anchor)
         else:
-            y += 20
+            name = f.type_name or f.type_code or "Aircraft"
+            fb, z = fit_scale(c, name, DISPLAY, c.inner, 26)
+            base = int(L_HERO - (cap(HERO) - cap(DISPLAY, z)) / 2)
+            c.text((c.m - 2, base), name, fb, anchor="ls")
+        _stats(c, L_STATS, _poster_cells(c, f, c.col_w), c.cols, c.col_w)
     else:
-        plane_w = 380 if show_plane else 0
-        text_w_max = inner - plane_w - 24
-        ff = fit(c.d, fn, "bold", 38, text_w_max, 22)
-        c.text((c.m, top + 6), fn, ff, fill=accent, anchor="lt")
-        ty = top + 6 + ff.size + 12
-        if airline:
-            fa = fit(c.d, airline, "semi", 21, text_w_max, 14)
-            for line in _wrap(c.d, airline, fa, text_w_max)[:2]:
-                c.text((c.m, ty), line, fa, anchor="lt")
-                ty += fa.size + 6
-        block_h = 100 if show_plane else 0
+        ff, _ = fit_scale(c, fn, TITLE, c.inner, 26)
+        c.text((c.m - 1, P_NUM), fn, ff, fill=accent, anchor="ls")
+        last = _identity(c, c.m, P_ID, f, c.inner)
+        top = max(P_PLANE, last + 22)
         if show_plane:
-            img = plane.draw(kind, plane_w, block_h, logo=logo, accent=accent)
-            c.paste_plane(img, (c.w - c.m - img.width + 4, top + (block_h - img.height) // 2))
-        y = max(ty, top + block_h) + 28
-
-    rows = 2 if c.portrait else 1
-    stats_top = c.h - c.m + 10 - FOOTER_WX - rows * ROW_H - 14
-
-    content_end = y
-    c.sky = (c.m, head + 4, c.w - c.m, y - 10)
-    # --- route
-    if f.has_route:
-        o, d = f.origin, f.destination
-        if c.portrait:
-            fc = font("semi", 20)
-            # two codes, two cities and the arrow must fit above the figures
-            cap_room = (stats_top - 22 - y - 2 * (12 + fc.size + 16) - 28) / 2
-            size = 76
-            while size > 40 and font("bold", size).getbbox("A")[3] > cap_room:
-                size -= 4
-            big = min((fit(c.d, ap["iata"], "bold", size, inner, 40) for ap in (o, d)),
-                      key=lambda f_: f_.size)
-            ah = big.getbbox("A")[3]
-            for i, ap in enumerate((o, d)):
-                c.text((c.m - 3, y), ap["iata"], big, anchor="lt")
-                cy = y + ah - 3
-                fc_ = fit(c.d, ap["city"], "semi", 20, inner, 14)
-                c.text((c.m, cy), ellipsize(c.d, ap["city"], fc_, inner), fc_, anchor="lt")
-                content_end = cy + fc_.getbbox("L")[3]
-                y = cy + fc.size + 16
-                if i == 0:
-                    _arrow(c, c.m, c.m + 70, y + 6, accent, head=14, thick=4)
-                    y += 28
+            img = plane.draw(kind, c.inner, 96, logo=logo, accent=accent)
+            c.paste_plane(img, (c.m + (c.inner - img.width) // 2, top))
+        c.sky = (c.m + c.inner // 2, CONTENT_TOP - 8, c.w - c.m, P_ID - 10)
+        if f.has_route:
+            o, d = f.origin, f.destination
+            size = min(fit_scale(c, ap["iata"], HERO, c.inner, 56)[1] for ap in (o, d))
+            big = F(HERO, size)
+            b1 = P_CODE1 + (top - P_PLANE)
+            c.text((c.m - 5, b1), o["iata"], big, anchor="ls")
+            fc, _ = fit_scale(c, o["city"], SUB, c.inner)
+            c.text((c.m, b1 + 36), o["city"], fc, anchor="ls")
+            ay = b1 + 66
+            _arrow(c, c.m, c.m + 80, ay, accent, thick=ARROW_HERO)
+            b2 = ay + 28 + cap(HERO, size)
+            c.text((c.m - 5, b2), d["iata"], big, anchor="ls")
+            fc, _ = fit_scale(c, d["city"], SUB, c.inner)
+            c.text((c.m, b2 + 36), d["city"], fc, anchor="ls")
         else:
-            arrow_w = 100
-            code_w = (inner - arrow_w) / 2
-            fc = font("semi", 19)
-            cap_room = stats_top - 24 - y - (14 + fc.size)
-            size = 80
-            while size > 48 and font("bold", size).getbbox("A")[3] > cap_room:
-                size -= 4
-            big = min((fit(c.d, ap["iata"], "bold", size, code_w, 48) for ap in (o, d)),
-                      key=lambda f_: f_.size)
-            c.text((c.m - 4, y), o["iata"], big, anchor="lt")
-            c.text((c.w - c.m, y), d["iata"], big, anchor="rt")
-            ah = big.getbbox("A")[3]
-            _arrow(c, c.m + code_w + 22, c.m + code_w + arrow_w - 22, y + ah * 0.55,
-                   accent, head=14, thick=4)
-            cy = y + ah - 3                       # half the old gap below the codes
-            c.text((c.m, cy), ellipsize(c.d, o["city"], fc, code_w), fc, anchor="lt")
-            c.text((c.w - c.m, cy), ellipsize(c.d, d["city"], fc, code_w), fc, anchor="rt")
-            content_end = cy + fc.getbbox("L")[3]
-    else:
-        name = f.type_name or f.type_code or "Aircraft"
-        room = stats_top - 22 - y
-        size = 46 if not c.portrait else 38
-        while size > 22 and font("bold", size).getbbox("Ag")[3] > room:
-            size -= 2
-        fb = fit(c.d, name, "bold", size, inner, 22)
-        c.text((c.m - 2, y), ellipsize(c.d, name, fb, inner), fb, anchor="lt")
-        content_end = y + fb.getbbox("L")[3]
-
-    # --- figures
-    # figures follow the route with a 17px gap (half the old spacing); never past the bottom limit
-    y = min(content_end + 12 - font("bold", 12).getbbox("A")[1], stats_top)
-    ph = phase(f)
-    cells = [
-        ("Altitude" + ("" if ph == "level" else f" · {ph}"), fmt_alt(f.altitude_ft, units)),
-        ("Speed", fmt_speed(f.speed_kt, units)),
-        ("Aircraft", f.type_code or "–"),
-        ("Registration", f.registration or "–"),
-    ]
-    if c.portrait and f.has_route and f.type_name:
-        cells[2] = ("Aircraft", f.type_name)
-    _stats(c, y, cells, 2 if c.portrait else 4)
+            name = f.type_name or f.type_code or "Aircraft"
+            fb = F(DISPLAY)
+            lines = _wrap(c.d, name, fb, c.inner)
+            if len(lines) > 3:
+                fb = F(TITLE)
+                lines = _wrap(c.d, name, fb, c.inner)
+            y0 = P_CODE1 + 60
+            for i, line in enumerate(lines[:4]):
+                c.text((c.m - 2, y0 + i * 62), line, fb, anchor="ls")
+        _stats(c, P_STATS, _poster_cells(c, f, c.col_w), c.cols, c.col_w)
 
     _footer_wx(c, wx)
     return finish(c, cfg, wx, night)
 
 
+_LAST = re.compile(r"^(.*?)\b([A-Z0-9]{3,4})\s*[–\-→]\s*([A-Z0-9]{3,4})\b(.*)$")
+
+
+def _last_seen(c, x, base, s, max_w):
+    """'BA283 LHR–LAX at 21:14' drawn with the route arrow, like every other route."""
+    m = _LAST.match(s or "")
+    fv = F(VALUE)
+    if not m:
+        c.text((x, base), s, fit_scale(c, s, VALUE, max_w)[0], anchor="ls")
+        return
+    pre, o, d, post = m.groups()
+    if pre.strip():
+        c.text((x, base), pre.strip(), fv, anchor="ls")
+        x += text_w(c.d, pre.strip() + " ", fv)
+    gap, aw = 6, 22
+    c.text((x, base), o, fv, anchor="ls")
+    x += text_w(c.d, o, fv) + gap
+    _arrow(c, x, x + aw, int(base - cap(VALUE) / 2), c.accent, thick=4)
+    x += aw + gap
+    c.text((x, base), d + post, fv, anchor="ls")
+
+
 def quiet(cfg, last=None, wx=None):
+    """Nothing overhead: the poster's skeleton, with the words where the codes go."""
     c = Canvas(cfg.get("orientation", "landscape"))
     night = is_night(cfg, wx)
-    accent = _accent(cfg, night)
-    units = cfg.get("units", "metric")
-    head = _header(c, "THE SKY ABOVE", "", accent)
-    y = head + 30
-    big = font("bold", 120 if not c.portrait else 110)
-    c.text((c.m - 4, y), "Quiet", big, anchor="lt")
-    y += int(big.size * 1.0)
-    c.text((c.m - 2, y), "skies", big, fill=accent, anchor="lt")
-    y += int(big.size * 1.15)
-    r = fmt_dist(float(cfg.get("radius_km") or 15), units)
-    y = min(y, c.h - 150)
-    c.text((c.m, y), f"Nothing within {r} right now.", font("semi", 22), anchor="lt")
+    c.setup(cfg, night)
+    _header(c, "THE SKY ABOVE", "")
+    big = F(HERO_S)
+    r = fmt_dist(float(cfg.get("radius_km") or 15), c.units)
+    if not c.portrait:
+        b2, sub, stats = L_HERO, L_CITY, L_STATS
+    else:
+        b2, sub, stats = 554, 590, P_STATS
+    c.text((c.m - 4, b2 - 94), "Quiet", big, anchor="ls")
+    c.text((c.m - 3, b2), "skies", big, fill=c.accent, anchor="ls")
+    fs, _ = fit_scale(c, f"Nothing within {r} right now.", SUB, c.inner)
+    c.text((c.m, sub), f"Nothing within {r} right now.", fs, anchor="ls")
     if last:
-        c.text((c.m, y + 34), f"Last seen: {last}", font("regular", 20), anchor="lt")
+        tracked(c, (c.m, stats), "LAST SEEN", LABEL)
+        _last_seen(c, c.m, stats + VAL_DY, last, c.inner)
     _footer_wx(c, wx)
-    c.sky = (c.m, head + 4, c.w - c.m, c.h - c.m + 10 - FOOTER_WX - 8)
+    if c.portrait:
+        c.sky = (c.m, CONTENT_TOP, c.w - c.m, b2 - 94 - cap(HERO_S) - 16)
+    else:
+        c.sky = (c.mid, CONTENT_TOP, c.w - c.m, b2 - cap(HERO_S) - 12)
     return finish(c, cfg, wx, night)
 
 
@@ -505,34 +733,44 @@ def message(cfg, title, lines, qr_data=None, header="SETUP"):
     """Setup and status screens."""
     c = Canvas(cfg.get("orientation", "landscape"))
     night = is_night(cfg) if cfg.get("lat") is not None else False
-    accent = _accent(cfg, night)
-    y = _header(c, header, "", accent) + 36
-    inner = c.w - 2 * c.m
-    qr_size = 0
+    c.setup(cfg, night)
+    _header(c, header, "")
     qr_img = None
+    qr_size = 0
     if qr_data:
-        qr_img = _qr(qr_data, 220 if not c.portrait else 260)
+        qr_img = _qr(qr_data, 228 if not c.portrait else 260)
         qr_size = qr_img.size[0] if qr_img else 0
-    text_w_max = inner - (qr_size + 30 if qr_img and not c.portrait else 0)
-    ft = fit(c.d, title, "bold", 56, text_w_max, 28)
-    c.text((c.m - 2, y), title, ft, anchor="lt")
-    ty = y + ft.getbbox("Ag")[3] + 24
-    fl = font("semi", 22)
+    text_max = c.inner - qr_size - 40 if (qr_img and not c.portrait) else c.inner
+    ft = F(DISPLAY)
+    tl = _wrap(c.d, title, ft, text_max)
+    if len(tl) > 2:
+        ft = F(TITLE)
+        tl = _wrap(c.d, title, ft, text_max)
+    base = CONTENT_TOP + 8 + cap(DISPLAY if ft.size == DISPLAY[1] else TITLE)
+    lead = int(ft.size * 1.05)
+    for line in tl:
+        c.text((c.m - 2, base), line, ft, anchor="ls")
+        base += lead
+    ty = base - lead + 48
+    fl = F(SUB)
+    room = (c.bottom - (qr_size + 24 if (qr_img and c.portrait) else 0)) - ty
+    need = sum(len(_wrap(c.d, ln, fl, text_max)) for ln in lines) * 32 + 8 * len(lines)
+    if need > room:
+        fl = F(BODY)
+    lh = 32 if fl.size >= 26 else 22
     for line in lines:
-        for chunk in _wrap(c.d, line, fl, text_w_max):
-            c.text((c.m, ty), chunk, fl, anchor="lt")
-            ty += 32
-        ty += 6
+        for chunk in _wrap(c.d, line, fl, text_max):
+            c.text((c.m, ty), chunk, fl, anchor="ls")
+            ty += lh
+        ty += 8
+    qr_xy = None
     if qr_img:
-        if c.portrait:
-            c.img.paste(qr_img, (c.m, min(ty + 20, c.h - qr_size - 70)))
-        else:
-            c.img.paste(qr_img, (c.w - c.m - qr_size, y))
+        qr_xy = (c.m, min(ty + 8, c.bottom - qr_size)) if c.portrait \
+            else (c.w - c.m - qr_size, CONTENT_TOP + 8)
+        c.img.paste(qr_img, qr_xy)
     _footer(c, cfg, "")
     if qr_img and night:
-        # a QR code must stay dark on light to scan; give it a white surround
-        c.keep.append((_framed(qr_img), (c.m - 8, min(ty + 12, c.h - qr_size - 78))
-                       if c.portrait else (c.w - c.m - qr_size - 8, y - 8)))
+        c.keep.append((_framed(qr_img), (qr_xy[0] - 8, qr_xy[1] - 8)))
     return finish(c, cfg, None, night, decorate=False)
 
 
@@ -597,170 +835,199 @@ def for_panel(img):
     return img
 
 
+
+
 # ---------------------------------------------------------------- two at once
-def _route_text(f):
-    if f.has_route:
-        return f"{f.origin['iata']} → {f.destination['iata']}"
-    return f.type_name or f.type_code or "Aircraft"
-
-
-def _detail_line(f, units, number=True):
-    bits = [f.airline or f.operator, f.flight_number if number else "",
-            f.type_name if f.has_route else (f.registration or ""),
-            fmt_alt(f.altitude_ft, units), fmt_speed(f.speed_kt, units)]
-    return "  ·  ".join(b for b in bits if b and b != "–")
-
-
 def duo(flights, cfg, nearby=2, logos=(None, None), wx=None):
-    """Two aircraft overhead: both drawings in the sky, one line each below."""
+    """Two aircraft: two equal half-posters (stacked in portrait). Figures line up."""
     c = Canvas(cfg.get("orientation", "landscape"))
     night = is_night(cfg, wx)
-    units = cfg.get("units", "metric")
-    accent = _accent(cfg, night)
-    facing = cfg.get("facing", 0)
+    c.setup(cfg, night)
     show_plane = cfg.get("show_plane", True)
     count = f"{nearby} overhead" if nearby > 2 else "Two overhead"
-    head = _header(c, "OVERHEAD NOW", count, accent)
-    inner = c.w - 2 * c.m
-    y = head + 16
-    f_num = font("bold", 15)
+    _header(c, "OVERHEAD NOW", count)
 
-    def entry(i, f, y, w):
-        """Number, route, distance and compass, then the details. Returns the bottom."""
-        x = c.m
-        c.text((x, y + 4), str(i + 1), f_num, fill=accent, anchor="lt")
-        x += 24
-        where = f"{fmt_dist(f.distance_km, units)} {compass(f.bearing)}"
-        fw = font("semi", 16)
-        where_w = text_w(c.d, where, fw) + 30
-        fr = fit(c.d, _route_text(f), "bold", 34 if not c.portrait else 30, w - 24 - where_w, 20)
-        c.text((x - 2, y), ellipsize(c.d, _route_text(f), fr, w - 24 - where_w), fr, anchor="lt")
-        c.text((c.m + w, y + 4), where, fw, anchor="rt")
-        compass_glyph(c.d, c.m + w - text_w(c.d, where, fw) - 16, y + 12, 10, f.bearing, facing, accent)
-        ly = y + fr.getbbox("L")[3] + 12
-        fd = font("regular", 16)
-        line = _detail_line(f, units, number=not (show_plane and not c.portrait))
-        c.text((x, ly), ellipsize(c.d, line, fd, w - 24), fd, anchor="lt")
-        return ly + fd.getbbox("L")[3]
+    def block(i, f, x, w, y0, ph, xs, col_w):
+        if show_plane and ph:
+            img = plane.draw(plane.classify(f.type_code, f.category), int(w), ph,
+                             logo=logos[i] if i < len(logos) else None, accent=c.accent)
+            px = x if not c.portrait else x + (w - img.width) // 2
+            c.paste_plane(img, (px, y0 + (ph - img.height) // 2))
+        b_num = y0 + ph + (16 if ph else 8) + cap(TITLE)
+        fn, _ = fit_scale(c, ident(f), TITLE, w, 26)
+        c.text((x - 1, b_num), ident(f), fn, fill=c.accent, anchor="ls")
+        b_id = _identity(c, x, b_num + 24, f, w, BODY, max_lines=1)
+        b_route = b_id + 16 + cap(DISPLAY)
+        if f.has_route:
+            route_line(c, x - 2, b_route, f.origin["iata"], f.destination["iata"], DISPLAY, w)
+        else:
+            name = f.type_name or f.type_code or "Aircraft"
+            fr, _ = fit_scale(c, name, DISPLAY, w, 26)
+            c.text((x - 2, b_route), name, fr, anchor="ls")
+        cells = [("Distance", "", f), ("Altitude", fmt_alt(f.altitude_ft, c.units), phase(f)),
+                 ("Speed", fmt_speed(f.speed_kt, c.units)), ("Aircraft", aircraft_value(c, f, col_w))]
+        _stats(c, b_route + 36, cells, xs, col_w)
+        return b_route + 36 + ROW_H + VAL_DY
 
     if not c.portrait:
-        if show_plane:
-            pw = (inner - 40) // 2
-            for i, f in enumerate(flights[:2]):
-                img = plane.draw(plane.classify(f.type_code, f.category), pw, 84,
-                                 logo=logos[i] if i < len(logos) else None, accent=accent)
-                x0 = c.m + i * (pw + 40)
-                c.paste_plane(img, (x0 + (pw - img.width) // 2, y + (84 - img.height) // 2))
-                lab_y = y + 84 + 10
-                c.text((x0 + (pw - img.width) // 2 + 4, lab_y), f"{i + 1}", f_num, fill=accent)
-                c.text((x0 + (pw - img.width) // 2 + 22, lab_y), f.flight_number, f_num)
-            sky_bottom = y + 84 + 10
-            y += 84 + 44
-        else:
-            sky_bottom = y
-            y += 10
-        c.sky = (c.m, head + 4, c.w - c.m, sky_bottom)
-        bottom = c.h - c.m + 10 - FOOTER_WX - 16
-        gap = max(18, (bottom - y - 2 * 64) // 2)
+        ph = 80 if show_plane else 0
+        col_w = (c.half - GUTTER) // 2
         for i, f in enumerate(flights[:2]):
-            y = entry(i, f, y, inner) + gap
+            x = c.m if i == 0 else c.mid
+            block(i, f, x, c.half, CONTENT_TOP - 2, ph, [x, x + col_w + GUTTER], col_w)
+        c.sky = (c.m, CONTENT_TOP - 8, c.w - c.m + 8, CONTENT_TOP + ph) if show_plane else None
     else:
+        ph = 52 if show_plane else 0
+        span = (c.bottom - CONTENT_TOP) // 2
         for i, f in enumerate(flights[:2]):
-            if show_plane:
-                img = plane.draw(plane.classify(f.type_code, f.category), inner, 92,
-                                 logo=logos[i] if i < len(logos) else None, accent=accent)
-                c.paste_plane(img, (c.m + (inner - img.width) // 2, y))
-                y += img.height + 16
-            y = entry(i, f, y, inner) + 40
-        c.sky = (c.m, head + 4, c.w - c.m, head + 4) if show_plane else None
+            block(i, f, c.m, c.inner, CONTENT_TOP - 2 + i * span, ph, c.cols, c.col_w)
+        c.sky = None
     _footer_wx(c, wx)
     return finish(c, cfg, wx, night, decorate=not c.portrait)
 
 
 # ---------------------------------------------------------------- radar
+def _dashed_ring(d, cx, cy, r, fill, width=2, dash_deg=4, gap_deg=4):
+    a = 0
+    while a < 360:
+        d.arc([cx - r, cy - r, cx + r, cy + r], a, a + dash_deg, fill=fill, width=width)
+        a += dash_deg + gap_deg
+
+
+HALO = 3
+
+
 def radar(contacts, cfg, wx=None, highlight=None):
-    """Everything within the radar range, turned so the top is the way the frame faces."""
+    """The scope (an instrument, left) and the readout (nearest list, right)."""
     c = Canvas(cfg.get("orientation", "landscape"))
     night = is_night(cfg, wx)
-    units = cfg.get("units", "metric")
-    accent = _accent(cfg, night)
-    facing = float(cfg.get("facing", 0) or 0)
+    c.setup(cfg, night)
+    accent, facing, units = c.accent, c.facing, c.units
     rng = float(cfg.get("radar_km") or 40)
+    contacts = sorted(contacts, key=lambda f: f.distance_km)
     n = len(contacts)
-    head = _header(c, "RADAR", f"{n} aircraft within {fmt_dist(rng, units)}", accent)
-    foot_top = c.h - c.m + 10 - FOOTER_WX
+    _header(c, "RADAR", f"{n} aircraft within {fmt_dist(rng, units)}")
     if c.portrait:
-        r = (c.w - 2 * c.m) // 2 - 6
-        cx, cy = c.w // 2, head + 34 + r
-        list_x, list_y, list_w = c.m, cy + r + 34, c.w - 2 * c.m
-        rows = max(0, min(5, (foot_top - 16 - list_y - 24) // 50))
+        r = c.inner // 2 - 14
+        cx, cy = c.w // 2, CONTENT_TOP + 22 + r
+        list_x, list_w = c.m, c.inner
+        list_base = cy + r + 44
+        rows = 5
     else:
-        r = (foot_top - head - 46) // 2
-        cx, cy = c.m + r + 8, head + 28 + r
-        list_x = cx + r + 48
-        list_y, list_w, rows = head + 22, c.w - c.m - list_x, 6
+        r = 152
+        cx, cy = c.m + c.half // 2, CONTENT_TOP + 20 + r
+        list_x, list_w = c.mid, c.w - c.m - c.mid
+        list_base = CONTENT_TOP + cap(LABEL)
+        rows = 5
     d = c.d
-    # rings, cross and range labels
-    for frac in (0.5, 1.0):
-        rr = r * frac
-        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=BLACK, width=1 if frac < 1 else 2)
-    d.line([cx - r, cy, cx + r, cy], fill=BLACK, width=1)
-    d.line([cx, cy - r, cx, cy + r], fill=BLACK, width=1)
-    fl = font("regular", 11)
-    c.text((cx + 4, cy - r / 2 - 2), fmt_dist(rng / 2, units), fl, anchor="ld")
-    # north marker outside the ring
+    # the instrument: solid outer ring, dashed half-range ring, ticks at the four points
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=BLACK, width=2)
+    _dashed_ring(d, cx, cy, r / 2, BLACK)
+    for k in range(4):
+        a = math.radians(k * 90 - facing)
+        d.line([cx + math.sin(a) * (r - 10), cy - math.cos(a) * (r - 10),
+                cx + math.sin(a) * r, cy - math.cos(a) * r], fill=BLACK, width=2)
+    f_lab = font("semi", 13)
+    obstacles = []
     na = math.radians(-facing)
-    nx, ny = cx + math.sin(na) * (r + 13), cy - math.cos(na) * (r + 13)
-    c.text((nx, ny), "N", font("bold", 13), fill=accent, anchor="mm")
+    nx, ny = cx + math.sin(na) * (r + 14), cy - math.cos(na) * (r + 14)
+    tracked(c, (nx, ny + cap(LABEL) / 2), "N", LABEL, fill=accent, anchor="ms")
     # home
-    d.polygon([(cx, cy - 7), (cx - 6, cy - 1), (cx + 6, cy - 1)], fill=BLACK)
-    d.rectangle([cx - 4, cy - 1, cx + 4, cy + 5], fill=BLACK)
+    d.polygon([(cx, cy - 8), (cx - 7, cy - 1), (cx + 7, cy - 1)], fill=BLACK)
+    d.rectangle([cx - 5, cy - 1, cx + 5, cy + 6], fill=BLACK)
+    obstacles.append(((cx - 9, cy - 10, cx + 9, cy + 8), None))
 
     def pos(f):
         a = math.radians(f.bearing - facing)
         k = min(1.0, f.distance_km / rng) * r
         return cx + math.sin(a) * k, cy - math.cos(a) * k
 
-    labels = []
-    f_cs, f_alt = font("bold", 13), font("regular", 11)
     hl = highlight.hex if highlight else (contacts[0].hex if contacts else None)
-    for f in reversed(contacts):                       # nearest drawn last, on top
+
+    def ident(f):
+        if highlight is not None and f.hex == highlight.hex:
+            return _ident(highlight)
+        return _ident(f)
+
+    for f in reversed(contacts):
         x, y = pos(f)
         if f.track is not None:
             a = math.radians(f.track - facing)
-            d.line([x, y, x + math.sin(a) * 13, y - math.cos(a) * 13], fill=BLACK, width=2)
-        rad = 6 if f.hex == hl else 4
-        d.ellipse([x - rad, y - rad, x + rad, y + rad], fill=accent, outline=BLACK, width=1)
-    for f in contacts[:10]:                             # label the nearest ten if there's room
-        x, y = pos(f)
-        name = f.callsign or f.registration or f.hex.upper()
-        alt = fmt_alt(f.altitude_ft, units)
-        tw = max(text_w(d, name, f_cs), text_w(d, alt, f_alt))
-        for dx, dy, anc in ((9, -12, "l"), (-9, -12, "r"), (9, 2, "l"), (-9, 2, "r")):
-            x0 = x + dx if anc == "l" else x + dx - tw
-            box = (x0 - 2, y + dy - 2, x0 + tw + 2, y + dy + 28)
-            inside = math.hypot(max(abs(box[0] - cx), abs(box[2] - cx)),
-                                max(abs(box[1] - cy), abs(box[3] - cy))) < r + 40
-            if inside and box[0] > 4 and box[2] < (list_x - 20 if not c.portrait else c.w - 4) \
-                    and not any(_overlap(box, b) for b in labels):
-                labels.append(box)
-                c.text((x0, y + dy), name, f_cs)
-                c.text((x0, y + dy + 15), alt, f_alt)
+            ex, ey = x + math.sin(a) * 15, y - math.cos(a) * 15
+            d.line([x, y, ex, ey], fill=BLACK, width=2)
+            obstacles.append(((min(x, ex) - 1, min(y, ey) - 1, max(x, ex) + 1, max(y, ey) + 1), f.hex))
+        rad = 7 if f.hex == hl else 5
+        d.ellipse([x - rad, y - rad, x + rad, y + rad], fill=accent, outline=BLACK, width=2)
+        obstacles.append(((x - rad - 1, y - rad - 1, x + rad + 1, y + rad + 1), f.hex))
+    # both rings labelled, on a paper halo, where no aircraft is
+    marks = [b for b, who in obstacles if who is not None]
+    for rr, txt in ((r / 2, fmt_dist(rng / 2, units)), (r, fmt_dist(rng, units))):
+        tw = text_w(d, txt, f_lab)
+        for deg in (150, 210, 120, 240, 60, 300, 30, 330):
+            a = math.radians(deg)
+            lx, ly = cx + math.sin(a) * rr, cy - math.cos(a) * rr
+            box = (lx - tw / 2 - HALO, ly - 7 - HALO, lx + tw / 2 + HALO, ly + 6 + HALO)
+            if not any(_overlap(box, b) for b in marks) and box[3] < c.foot - 24:
                 break
-    # nearest list
-    c.text((list_x, list_y), "NEAREST", font("bold", 12))
-    yy = list_y + 24
-    for f in contacts[:rows]:
-        name = f.flight_number if f.callsign else (f.registration or f.hex.upper())
-        where = f"{fmt_dist(f.distance_km, units)} {compass(f.bearing)}"
-        c.text((list_x, yy), name, font("semi", 18), fill=accent if f.hex == hl else BLACK)
-        fs = font("regular", 14)
-        c.text((list_x + list_w, yy + 2), where, fs, anchor="ra")
-        sub = "  ·  ".join(b for b in (f.type_code, fmt_alt(f.altitude_ft, units)) if b and b != "–")
-        c.text((list_x, yy + 24), sub, fs)
-        yy += 50
-    if not contacts:
-        c.text((list_x, yy), "Nothing on radar.", font("semi", 18))
+        d.rectangle(box, fill=WHITE)
+        c.text((lx, ly + 5), txt, f_lab, anchor="ms")
+        obstacles.append((box, None))
+    order = sorted(contacts[:10], key=lambda f: f.hex != hl)        # the highlighted one first
+    limit_x = list_x - 12 if not c.portrait else c.w - 4
+    for f in order:
+        x, y = pos(f)
+        name = ident(f)
+        alt = fmt_alt(f.altitude_ft, units)
+        spots = [(dx, dy, anc, 2) for dx, dy, anc in
+                 ((10, -13, "l"), (-10, -13, "r"), (10, 2, "l"), (-10, 2, "r"), (10, -24, "l"), (-10, -24, "r"),
+                  (10, -32, "l"), (-10, -32, "r"), (-10, 10, "r"), (10, 10, "l"))]
+        spots += [(dx, dy, anc, 1) for dx, dy, anc in
+                  ((10, -7, "l"), (-10, -7, "r"), (-8, -24, "l"), (-8, 9, "l"), (-8, -24, "r"), (8, 9, "r"))]
+        placed = None
+        for dx, dy, anc, nl in spots:   # name and height; only the name when crowded
+            tw = max(text_w(d, name, f_lab), text_w(d, alt, f_lab)) if nl == 2 else text_w(d, name, f_lab)
+            x0 = x + dx if anc == "l" else x + dx - tw
+            box = (x0 - HALO, y + dy - HALO, x0 + tw + HALO, y + dy + (29 if nl == 2 else 13) + HALO)
+            inside = math.hypot(max(abs(box[0] - cx), abs(box[2] - cx)),
+                                max(abs(box[1] - cy), abs(box[3] - cy))) < r + 44
+            if inside and box[0] > 4 and box[2] < limit_x \
+                    and not any(_overlap(box, b) for b, who in obstacles if who != f.hex):
+                placed = (x0, dy, nl, box)
+                break
+        if placed is None and f.hex == hl:          # the nearest is always labelled
+            tw = max(text_w(d, name, f_lab), text_w(d, alt, f_lab))
+            x0 = x + 10
+            placed = (x0, -13, 2, (x0 - HALO, y - 13 - HALO, x0 + tw + HALO, y + 16 + HALO))
+        if placed:
+            x0, dy, nl, box = placed
+            obstacles.append((box, None))
+            d.rectangle(box, fill=WHITE)
+            c.text((x0, y + dy + 10), name, f_lab, anchor="ls")
+            if nl == 2:
+                c.text((x0, y + dy + 26), alt, f_lab, anchor="ls")
+    # the readout: the nearest as a large row, then a quiet table
+    tracked(c, (list_x, list_base), "NEAREST", LABEL)
+    if contacts:
+        top = next((f for f in contacts if f.hex == hl), contacts[0])
+        hb = list_base + 14 + cap(TITLE)
+        dw = where_figure(c, 0, 0, top, VALUE, draw=False)
+        fn, _ = fit_scale(c, ident(top), TITLE, list_w - dw - 16, 26)
+        c.text((list_x - 1, hb), ident(top), fn, fill=accent, anchor="ls")
+        where_figure(c, list_x + list_w, hb, top, VALUE, anchor="r")
+        sub = "  ·  ".join(b for b in (short_type(top), fmt_alt(top.altitude_ft, units)) if b and b != "–")
+        c.text((list_x, hb + 28), sub, F(BODY), anchor="ls")
+        yy = hb + 28 + 44
+        rest = [f for f in contacts if f is not top][:rows]
+        for f in rest:
+            if yy > c.bottom:
+                break
+            c.text((list_x, yy), ident(f), F(BODY_S), anchor="ls")
+            sub = " · ".join(b for b in (f.type_code, fmt_alt(f.altitude_ft, units)) if b and b != "–")
+            c.text((list_x + (112 if not c.portrait else 132), yy), sub, F(BODY), anchor="ls")
+            where_figure(c, list_x + list_w, yy, f, BODY_S, anchor="r")
+            yy += 34
+    else:
+        c.text((list_x, list_base + 40), "Nothing on radar.", F(VALUE), anchor="ls")
     _footer_wx(c, wx)
     return finish(c, cfg, wx, night, decorate=False)
 

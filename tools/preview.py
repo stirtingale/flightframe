@@ -51,6 +51,12 @@ SAMPLES = {
         callsign="RRR6513", altitude_ft=24000, speed_kt=330, vertical_fpm=-1200, distance_km=11.4,
         bearing=170, registration="ZZ336", type_code="A332", type_name="Airbus Voyager KC2",
         operator="Royal Air Force"),
+    "long-names": _f(
+        callsign="CLH2FX", altitude_ft=31000, speed_kt=440, vertical_fpm=-900, distance_km=14.6, bearing=95,
+        registration="D-AIZV", type_code="A20N", type_name="Airbus A320-271N",
+        airline="Lufthansa City Airlines Regional", airline_iata="VL", flight_iata="VL1934",
+        origin={"iata": "FRA", "city": "Frankfurt am Main"},
+        destination={"iata": "LPA", "city": "Las Palmas de Gran Canaria"}),
     "air-ambulance": _f(
         callsign="HLE65", altitude_ft=1500, speed_kt=130, distance_km=2.2, bearing=220,
         registration="G-WASN", type_code="EC35", type_name="Eurocopter EC135",
@@ -71,7 +77,8 @@ def sample_radar():
     out = []
     for i, (cs, t, alt, km, brg, trk) in enumerate(RADAR):
         out.append(_f(hex=f"40{i:04x}", callsign=cs, type_code=t, altitude_ft=alt, distance_km=km,
-                      bearing=brg, track=trk, speed_kt=300, registration="G-ABCD" if not cs else ""))
+                      bearing=brg, track=trk, speed_kt=300, registration="G-ABCD" if not cs else "",
+                      **({"airline_iata": "BA", "flight_iata": "BA283"} if cs == "BAW283" else {})))
     return out
 
 
@@ -128,12 +135,20 @@ def main(out):
         wx["slots"][0]["kind"] = "rain"
         render.duo([a, b], night, 2, logos=(_logo(a), _logo(b)), wx=wx).save(f"{out}/{orient}-night-duo-rain.png")
         render.radar(sample_radar(), night, wx=wx).save(f"{out}/{orient}-night-radar.png")
+        imp = dict(cfg, units="imperial")
+        render.poster(b, imp, logo=_logo(b), wx=sample_wx()).save(f"{out}/{orient}-imperial.png")
+        render.radar(sample_radar(), dict(night, units="imperial"), wx=wx).save(
+            f"{out}/{orient}-imperial-night-radar.png")
+        render.quiet(night, "BA283 LHR–LAX at 21:14", wx=wx).save(f"{out}/{orient}-night-quiet.png")
         from flightframe import trackmap
         for q, f, trail in sample_track():
             trackmap.tracker(cfg, q, f, trail=[(p[0], p[1]) for p in trail], wx=sample_wx()).save(
                 f"{out}/{orient}-track-{q}.png")
         trackmap.tracker(night, "BA283", None, route={"origin": None}, state="unknown",
                          wx=sample_wx()).save(f"{out}/{orient}-track-unknown.png")
+        q, f, trail = sample_track()[0]
+        trackmap.tracker(night, q, f, trail=[(p[0], p[1]) for p in trail], wx=wx).save(
+            f"{out}/{orient}-night-track-BA283.png")
         render.message(cfg, "Connect me to Wi-Fi",
                        ["Join the Wi-Fi network Flightframe-Setup (password skyabove).",
                         "Then open http://10.42.0.1 and choose your home Wi-Fi."],
