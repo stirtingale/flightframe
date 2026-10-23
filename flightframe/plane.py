@@ -98,12 +98,36 @@ def _quantise(img):
     return img.convert("RGB").quantize(palette=pal, dither=Image.Dither.NONE).convert("RGB")
 
 
-def draw(kind, box_w, box_h, logo=None, accent=(255, 0, 0), stroke=2.2, face_right=True):
-    """Return (RGB image, (w, h)) of the aircraft fitted inside box_w x box_h."""
+def length_m(kind):
+    """The real fuselage length in metres (drawings run 0 to 100 nose to tail)."""
+    try:
+        return float(airframes.lookup(kind).get("length") or 30.0)
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def common_scale(kinds, box_w, box_h, stroke=2.2):
+    """Pixels per metre that fits every one of these aircraft in a box_w x box_h box,
+    so that drawn side by side they are true to size."""
+    pad = stroke * 1.2
+    best = None
+    for k in kinds:
+        bx0, by0, bx1, by1 = _bbox(ops_for(k))
+        m = length_m(k) / 100.0
+        ppm = min((box_w - 2 * pad) / ((bx1 - bx0) * m), (box_h - 2 * pad) / ((by1 - by0) * m))
+        best = ppm if best is None else min(best, ppm)
+    return best
+
+
+def draw(kind, box_w, box_h, logo=None, accent=(255, 0, 0), stroke=2.2, face_right=True, ppm=None):
+    """Return an RGB image of the aircraft fitted inside box_w x box_h.
+    ppm: draw at this many pixels per metre instead (see common_scale)."""
     ops = ops_for(kind)
     bx0, by0, bx1, by1 = _bbox(ops)
     pad = stroke * 1.2
     scale = min((box_w - 2 * pad) / (bx1 - bx0), (box_h - 2 * pad) / (by1 - by0))
+    if ppm:
+        scale = min(scale, ppm * length_m(kind) / 100.0)
     w = int(math.ceil((bx1 - bx0) * scale + 2 * pad))
     h = int(math.ceil((by1 - by0) * scale + 2 * pad))
 

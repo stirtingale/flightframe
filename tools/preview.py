@@ -82,10 +82,27 @@ def sample_radar():
     return out
 
 
+# Airport names and countries as adsbdb gives them
+AIRPORTS = {
+    "LHR": ("London Heathrow Airport", "United Kingdom"), "LAX": ("Los Angeles International Airport", "United States"),
+    "BRS": ("Bristol Airport", "United Kingdom"), "PMI": ("Palma de Mallorca Airport", "Spain"),
+    "DUB": ("Dublin Airport", "Ireland"), "FAO": ("Faro Airport", "Portugal"),
+    "MAN": ("Manchester Airport", "United Kingdom"), "DXB": ("Dubai International Airport", "United Arab Emirates"),
+    "SOU": ("Southampton Airport", "United Kingdom"), "EDI": ("Edinburgh Airport", "United Kingdom"),
+    "FRA": ("Frankfurt am Main Airport", "Germany"), "LPA": ("Gran Canaria Airport", "Spain"),
+    "STN": ("London Stansted Airport", "United Kingdom"),
+}
+for _s in SAMPLES.values():
+    for _ap in (_s.origin, _s.destination):
+        if _ap.get("iata") in AIRPORTS:
+            _ap["name"], _ap["country"] = AIRPORTS[_ap["iata"]]
+
 LHR = {"iata": "LHR", "city": "London", "lat": 51.4706, "lon": -0.46194}
 LAX = {"iata": "LAX", "city": "Los Angeles", "lat": 33.9425, "lon": -118.408}
 STN = {"iata": "STN", "city": "London", "lat": 51.885, "lon": 0.235}
 DUB = {"iata": "DUB", "city": "Dublin", "lat": 53.4213, "lon": -6.27007}
+for _ap in (LHR, LAX, STN, DUB):
+    _ap["name"], _ap["country"] = AIRPORTS[_ap["iata"]]
 
 
 def sample_track():

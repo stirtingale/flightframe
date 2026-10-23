@@ -195,6 +195,57 @@ def _ident(f):
     return f.flight_number or f.callsign or f.registration or (f.hex or "").upper()
 
 
+_COUNTRY = {"United States": "USA", "United States of America": "USA",
+            "United Arab Emirates": "UAE", "Russian Federation": "Russia",
+            "Korea, Republic of": "South Korea", "Iran, Islamic Republic of": "Iran"}
+
+
+def airport_name(ap):
+    """'London Heathrow Airport' -> 'Heathrow'; 'Los Angeles International Airport' ->
+    'Los Angeles Intl'; '' when it would only repeat the city."""
+    name, city = (ap.get("name") or "").strip(), (ap.get("city") or "").strip()
+    for w in (" International Airport", " Intl Airport", " Airport", " Aerodrome", " Airfield",
+              " Air Base", " Airstrip", " Heliport"):
+        if name.endswith(w):
+            name = name[: -len(w)] + (" International" if "International" in w else "")
+            break
+    name = name.replace("International", "Intl").strip()
+    if city and name.lower().startswith(city.lower() + " "):
+        rest = name[len(city):].strip()
+        if rest and rest.lower() != "intl":
+            name = rest
+    if name.lower() in (city.lower(), "", "intl"):
+        return ""
+    return name
+
+
+def place(ap):
+    """'Heathrow, London, United Kingdom': airport, city, country, without repeats."""
+    country = (ap.get("country") or "").strip()
+    country = _COUNTRY.get(country, country)
+    bits = [airport_name(ap), (ap.get("city") or "").strip(), country]
+    out = []
+    for b in bits:
+        if b and b.lower() not in (x.lower() for x in out):
+            out.append(b)
+    return ", ".join(out)
+
+
+LOC = ("semi", 13, 0)       # the full location under an airport code: very small
+
+
+def location(c, x, base, ap, max_w, anchor="ls", lines=2, prefix=""):
+    """The place name under a code, wrapped to at most `lines` lines. Returns the last baseline."""
+    f = F(LOC)
+    text = prefix + place(ap)
+    rows = _wrap(c.d, text, f, max_w)
+    if len(rows) > lines:
+        rows = rows[:lines - 1] + [ellipsize(c.d, " ".join(rows[lines - 1:]), f, max_w)]
+    for i, row in enumerate(rows):
+        c.text((x, base + i * 17), row, f, anchor=anchor)
+    return base + (len(rows) - 1) * 17
+
+
 def short_type(f):
     """'Airbus A350-1041' -> 'A350-1041'; the ICAO code when there's no name."""
     name = (f.type_name or "").strip()
@@ -369,13 +420,33 @@ def finish(c, cfg, wx, night, decorate=True):
 
 
 # ---------------------------------------------------------------- components
+def open_arrow(d, tail, tip, thick, fill, head=None):
+    """The one arrow: a straight shaft with an open, round-ended chevron head."""
+    (x0, y0), (x1, y1) = tail, tip
+    ln = math.hypot(x1 - x0, y1 - y0) or 1
+    ux, uy = (x1 - x0) / ln, (y1 - y0) / ln
+    h = head or max(thick * 2.4, 6)
+    arm = h / math.sqrt(2)
+    left = (x1 - arm * (ux - uy), y1 - arm * (uy + ux))
+    right = (x1 - arm * (ux + uy), y1 - arm * (uy - ux))
+    back = (x1 - ux * thick * 0.35, y1 - uy * thick * 0.35)
+    w = max(2, int(round(thick)))
+    d.line([tail, back], fill=fill, width=w)
+    d.line([left, tip, right], fill=fill, width=w, joint="curve")
+    r = w / 2 - 0.25
+    for px, py in (tail, left, right, tip):
+        d.ellipse([px - r, py - r, px + r, py + r], fill=fill)
+
+
 def compass_glyph(d, cx, cy, r, bearing, facing=0, accent=RED):
-    """The direction mark: one solid chevron pointing at the aircraft,
-    turned to suit the way the frame faces. No ring, no hairlines."""
+    """The direction mark: the arrow pointing at the aircraft, turned to suit the
+    way the frame faces."""
     a = math.radians((bearing - (facing or 0)) % 360)
-    ca, sa = math.cos(a), math.sin(a)
-    shape = [(0, -r), (0.8 * r, 0.9 * r), (0, 0.4 * r), (-0.8 * r, 0.9 * r)]
-    d.polygon([(cx + x * ca - y * sa, cy + x * sa + y * ca) for x, y in shape], fill=accent)
+    ux, uy = math.sin(a), -math.cos(a)
+    k = r * 0.92
+    thick = max(2, round(r / 3.2))
+    open_arrow(d, (cx - ux * k, cy - uy * k), (cx + ux * k, cy + uy * k), thick, accent,
+               head=r * 1.05)
 
 
 UNITS = ("m", "ft", "km", "mi", "km/h", "mph", "h", "min")
@@ -494,11 +565,8 @@ def _footer_wx(c, wx):
 
 
 def _arrow(c, x0, x1, y, fill, thick=ARROW_ROUTE):
-    """The one arrow: a solid shaft and a head 3 x the stroke long."""
-    head = thick * 3
-    hw = thick * 1.6
-    c.d.rectangle([x0, y - thick // 2, x1 - head + 1, y - thick // 2 + thick - 1], fill=fill)
-    c.d.polygon([(x1, y), (x1 - head, y - hw), (x1 - head, y + hw)], fill=fill)
+    """A horizontal route arrow (see open_arrow)."""
+    open_arrow(c.d, (x0 + thick / 2, y), (x1 - thick / 2, y), thick, fill, head=thick * 2.6 + 4)
 
 
 def route_line(c, x, base, o, d, style, max_w, anchor="l"):
@@ -632,9 +700,8 @@ def poster(f, cfg, nearby=0, logo=None, wx=None):
             c.text((c.w - c.m + 3, L_HERO), d["iata"], big, anchor="rs")
             _arrow(c, c.w // 2 - 40, c.w // 2 + 40, int(L_HERO - cap(HERO, size) / 2), accent,
                    thick=ARROW_HERO)
-            zc = min(fit_scale(c, ap["city"], SUB, code_w + 40)[1] for ap in (o, d))
             for ap, anchor, x in ((o, "ls", c.m), (d, "rs", c.w - c.m)):
-                c.text((x, L_CITY), ap["city"], F(SUB, zc), anchor=anchor)
+                location(c, x, L_HERO + 26, ap, code_w + 30, anchor=anchor)
         else:
             name = f.type_name or f.type_code or "Aircraft"
             fb, z = fit_scale(c, name, DISPLAY, c.inner, 26)
@@ -656,14 +723,12 @@ def poster(f, cfg, nearby=0, logo=None, wx=None):
             big = F(HERO, size)
             b1 = P_CODE1 + (top - P_PLANE)
             c.text((c.m - 5, b1), o["iata"], big, anchor="ls")
-            fc, _ = fit_scale(c, o["city"], SUB, c.inner)
-            c.text((c.m, b1 + 36), o["city"], fc, anchor="ls")
+            location(c, c.m, b1 + 26, o, c.inner)
             ay = b1 + 66
             _arrow(c, c.m, c.m + 80, ay, accent, thick=ARROW_HERO)
             b2 = ay + 28 + cap(HERO, size)
             c.text((c.m - 5, b2), d["iata"], big, anchor="ls")
-            fc, _ = fit_scale(c, d["city"], SUB, c.inner)
-            c.text((c.m, b2 + 36), d["city"], fc, anchor="ls")
+            location(c, c.m, b2 + 26, d, c.inner)
         else:
             name = f.type_name or f.type_code or "Aircraft"
             fb = F(DISPLAY)
@@ -847,9 +912,11 @@ def duo(flights, cfg, nearby=2, logos=(None, None), wx=None):
     count = f"{nearby} overhead" if nearby > 2 else "Two overhead"
     _header(c, "OVERHEAD NOW", count)
 
-    def block(i, f, x, w, y0, ph, xs, col_w):
+    kinds = [plane.classify(f.type_code, f.category) for f in flights[:2]]
+
+    def block(i, f, x, w, y0, ph, xs, col_w, ppm=None, rs=DISPLAY):
         if show_plane and ph:
-            img = plane.draw(plane.classify(f.type_code, f.category), int(w), ph,
+            img = plane.draw(kinds[i], int(w), ph, ppm=ppm,
                              logo=logos[i] if i < len(logos) else None, accent=c.accent)
             px = x if not c.portrait else x + (w - img.width) // 2
             c.paste_plane(img, (px, y0 + (ph - img.height) // 2))
@@ -857,30 +924,34 @@ def duo(flights, cfg, nearby=2, logos=(None, None), wx=None):
         fn, _ = fit_scale(c, ident(f), TITLE, w, 26)
         c.text((x - 1, b_num), ident(f), fn, fill=c.accent, anchor="ls")
         b_id = _identity(c, x, b_num + 24, f, w, BODY, max_lines=1)
-        b_route = b_id + 16 + cap(DISPLAY)
+        b_route = b_id + 16 + cap(rs)
         if f.has_route:
-            route_line(c, x - 2, b_route, f.origin["iata"], f.destination["iata"], DISPLAY, w)
+            route_line(c, x - 2, b_route, f.origin["iata"], f.destination["iata"], rs, w)
+            b = location(c, x, b_route + 20, f.origin, w, lines=1, prefix="From ")
+            b_route = location(c, x, b + 17, f.destination, w, lines=1, prefix="To ") - 4
         else:
             name = f.type_name or f.type_code or "Aircraft"
-            fr, _ = fit_scale(c, name, DISPLAY, w, 26)
+            fr, _ = fit_scale(c, name, rs, w, 26)
             c.text((x - 2, b_route), name, fr, anchor="ls")
         cells = [("Distance", "", f), ("Altitude", fmt_alt(f.altitude_ft, c.units), phase(f)),
                  ("Speed", fmt_speed(f.speed_kt, c.units)), ("Aircraft", aircraft_value(c, f, col_w))]
-        _stats(c, b_route + 36, cells, xs, col_w)
-        return b_route + 36 + ROW_H + VAL_DY
+        _stats(c, b_route + 32, cells, xs, col_w)
+        return b_route + 32 + ROW_H + VAL_DY
 
     if not c.portrait:
-        ph = 80 if show_plane else 0
+        ph = 60 if show_plane else 0
         col_w = (c.half - GUTTER) // 2
+        ppm = plane.common_scale(kinds, c.half, ph) if ph else None
         for i, f in enumerate(flights[:2]):
             x = c.m if i == 0 else c.mid
-            block(i, f, x, c.half, CONTENT_TOP - 2, ph, [x, x + col_w + GUTTER], col_w)
+            block(i, f, x, c.half, CONTENT_TOP - 2, ph, [x, x + col_w + GUTTER], col_w, ppm)
         c.sky = (c.m, CONTENT_TOP - 8, c.w - c.m + 8, CONTENT_TOP + ph) if show_plane else None
     else:
-        ph = 52 if show_plane else 0
-        span = (c.bottom - CONTENT_TOP) // 2
+        ph = 44 if show_plane else 0
+        ppm = plane.common_scale(kinds, c.inner, ph) if ph else None
+        y = CONTENT_TOP - 2
         for i, f in enumerate(flights[:2]):
-            block(i, f, c.m, c.inner, CONTENT_TOP - 2 + i * span, ph, c.cols, c.col_w)
+            y = block(i, f, c.m, c.inner, y, ph, c.cols, c.col_w, ppm, rs=TITLE) + 18
         c.sky = None
     _footer_wx(c, wx)
     return finish(c, cfg, wx, night, decorate=not c.portrait)
