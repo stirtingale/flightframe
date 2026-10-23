@@ -51,6 +51,7 @@ def create_app(worker):
         num("stats_refresh_minutes", int, 3, 120)
         num("radar_km", float, 5, 150)
         num("facing", int, 0, 359)
+        num("duo_within_pct", int, 5, 100)
         for key, allowed in (("units", {"metric", "imperial"}),
                              ("orientation", {"landscape", "portrait"}),
                              ("night_mode", {"auto", "light", "dark"}),
@@ -317,6 +318,8 @@ a{color:inherit}
     <label><input type="radio" name="duo" value="1" {{ 'checked' if cfg.duo }}><span>Show both</span></label>
     <label><input type="radio" name="duo" value="0" {{ 'checked' if not cfg.duo }}><span>Nearest only</span></label>
   </div>
+  <label for="duopct">Show both only when they're this close together <span class="hint">% of the overhead range ({{ '%.1f'|format(cfg.radius_km * (cfg.duo_within_pct or 25) / 100) }} km now)</span></label>
+  <input id="duopct" name="duo_within_pct" type="number" min="5" max="100" step="5" value="{{ cfg.duo_within_pct|int }}">
   <label for="facing">When you look at the frame, you face <span class="hint">turns the compass and radar to match the room</span></label>
   <select id="facing" name="facing">
     {% for deg, name in [(0,'North'),(45,'North-east'),(90,'East'),(135,'South-east'),(180,'South'),(225,'South-west'),(270,'West'),(315,'North-west')] %}

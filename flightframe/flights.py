@@ -293,10 +293,13 @@ class FlightSource:
                 best = f
                 break
         picked = [best]
+        # A second aircraft only when the two are close together: within a share
+        # of the overhead radius of each other (25% by default).
+        near = radius * float(cfg.get("duo_within_pct", 25) or 25) / 100.0
         for f in candidates:
             if len(picked) >= want:
                 break
-            if f is not best:
+            if f is not best and haversine_km(best.lat, best.lon, f.lat, f.lon) <= near:
                 enrich(f, self.details(f.hex, f.callsign))
                 picked.append(f)
         return picked, len(candidates), everyone

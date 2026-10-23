@@ -19,6 +19,7 @@ DEFAULTS = {
     "show_weather": True,        # 12-hour forecast in the bottom line
     "night_mode": "auto",        # auto (dark from sunset to sunrise) | light | dark
     "duo": True,                 # show two aircraft when two are overhead
+    "duo_within_pct": 25,        # ...and within this % of the radius of each other
     "facing": 0,                 # compass direction you face when looking at the frame
     "radar_km": 40,              # radar screen range
     "screen": "sky",             # sky | radar | track
